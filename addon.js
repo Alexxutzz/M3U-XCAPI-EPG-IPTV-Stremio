@@ -3,25 +3,31 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
 const ADDON_NAME = "IPTV Stremio";
-const ADDON_ID = "org.stremio.iptv.pro.v210";
-const VERSION = "2.1.0";
+const ADDON_ID = "org.stremio.iptv.pro.v220";
+const VERSION = "2.2.0";
 const RO_TIME = { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Bucharest', hour12: false };
 
-// --- LOGICĂ LOGO-URI HD (FALLBACK) ---
+// --- CONFIGURARE CANALE RECOMANDATE (DISCOVER MODE) ---
+const FEATURED_CHANNELS = [
+    "PRO TV", "DIGI SPORT 1", "DIGI SPORT 2", "DIGI SPORT 3", "DIGI SPORT 4", 
+    "ANTENA 1", "HBO", "CINEMAX", "EUROSPORT", "KANAL D", "PRIMA TV", "ORANGE SPORT"
+];
+
+// --- UTILS: LOGICĂ LOGO-URI HD (FALLBACK) ---
 const getSmartLogo = (baseName, originalLogo) => {
     if (originalLogo && originalLogo.startsWith('http') && !originalLogo.includes('no-logo')) {
         return originalLogo;
     }
-    // Transformăm numele în format slug: "Digi Sport 1" -> "digi-sport-1"
+    // Formatare nume pentru URL: "Digi Sport 1" -> "digi-sport-1"
     const slug = baseName.toLowerCase()
         .replace(/[^a-z0-9]/g, '-')
         .replace(/-+/g, '-')
         .replace(/^-|-$/g, '');
     
-    // Sursă externă de logo-uri HD (iptv-org)
     return `https://iptv-org.github.io/logos/languages/ron/${slug}.png`;
 };
 
+// --- UTILS: CURĂȚARE NUME ȘI DETECTARE CALITATE ---
 const cleanChannelName = (name) => {
     if (!name) return { baseName: "Canal TV", quality: "" };
     let quality = "";
@@ -100,37 +106,55 @@ async function createAddon(config) {
         idPrefixes: ["group_"]
     });
 
+    // --- HANDLER CATALOG (CU DISCOVER MODE) ---
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
         const q = args.extra?.search ? args.extra.search.toLowerCase() : "";
         const g = args.extra?.genre ? args.extra.genre.toLowerCase() : "";
 
-        if (!q && !g) return { metas: [] };
+        let filteredResults = [];
+
+        if (q) {
+            filteredResults = addon.channels.filter(i => i.name.toLowerCase().includes(q));
+        } else if (g) {
+            filteredResults = addon.channels.filter(i => (i.attributes?.['group-title'] || "").toLowerCase().includes(g));
+        } else {
+            // MODUL DISCOVER: Dacă nu există căutare, afișăm favoritele predefinite
+            filteredResults = addon.channels.filter(i => 
+                FEATURED_CHANNELS.some(fav => i.name.toUpperCase().includes(fav))
+            );
+        }
 
         const uniqueChannels = new Map();
-        
-        addon.channels.forEach(item => {
-            const nameMatch = item.name.toLowerCase().includes(q);
-            const groupMatch = g ? (item.attributes?.['group-title'] || "").toLowerCase().includes(g) : true;
-            
-            if (nameMatch && groupMatch) {
-                const { baseName } = cleanChannelName(item.name);
-                if (!uniqueChannels.has(baseName)) {
-                    const logo = getSmartLogo(baseName, item.attributes?.['tvg-logo'] || item.logo);
-                    uniqueChannels.set(baseName, {
-                        id: `group_${Buffer.from(baseName).toString('hex')}`,
-                        type: 'tv',
-                        name: baseName,
-                        poster: logo,
-                        posterShape: 'square'
-                    });
-                }
+        filteredResults.forEach(item => {
+            const { baseName } = cleanChannelName(item.name);
+            if (!uniqueChannels.has(baseName)) {
+                const logo = getSmartLogo(baseName, item.attributes?.['tvg-logo'] || item.logo);
+                uniqueChannels.set(baseName, {
+                    id: `group_${Buffer.from(baseName).toString('hex')}`,
+                    type: 'tv',
+                    name: baseName,
+                    poster: logo,
+                    posterShape: 'square'
+                });
             }
         });
 
-        return { metas: Array.from(uniqueChannels.values()).slice(0, 100) };
+        let finalMetas = Array.from(uniqueChannels.values());
+
+        // Sortare specială pentru favorite (modul Discover)
+        if (!q && !g) {
+            finalMetas.sort((a, b) => {
+                const indexA = FEATURED_CHANNELS.findIndex(f => a.name.toUpperCase().includes(f));
+                const indexB = FEATURED_CHANNELS.findIndex(f => b.name.toUpperCase().includes(f));
+                return indexA - indexB;
+            });
+        }
+
+        return { metas: finalMetas.slice(0, 100) };
     });
 
+    // --- HANDLER META (EPG) ---
     builder.defineMetaHandler(async ({ id }) => {
         if (!id.startsWith("group_")) return { meta: null };
         const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
@@ -152,9 +176,9 @@ async function createAddon(config) {
         if (epg && epg.length > 0) {
             const cur = epg.find(p => now >= p.start && now <= p.end) || epg[0];
             description += `🔴 ACUM: ${cur.title.toUpperCase()}\n`;
-            description += `⏰ ${cur.start.toLocaleTimeString('ro-RO', RO_TIME)} — ${cur.end.toLocaleTimeString('ro-RO', RO_TIME)}\n`;
+            description += `⏰ [${cur.start.toLocaleTimeString('ro-RO', RO_TIME)} — ${cur.end.toLocaleTimeString('ro-RO', RO_TIME)}]\n`;
             description += `${addon.getProgressBar(cur.start, cur.end)}\n\n`;
-            if (cur.desc) description += `ℹ️ INFO: ${cur.desc.substring(0, 150)}...\n\n`;
+            if (cur.desc) description += `ℹ️ INFO: ${cur.desc.substring(0, 180)}...\n\n`;
             
             const next = epg.filter(p => p.start > now).slice(0, 2);
             if (next.length > 0) {
@@ -173,6 +197,7 @@ async function createAddon(config) {
         };
     });
 
+    // --- HANDLER STREAM ---
     builder.defineStreamHandler(async ({ id }) => {
         if (!id.startsWith("group_")) return { streams: [] };
         const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
@@ -183,7 +208,7 @@ async function createAddon(config) {
                 const { quality } = cleanChannelName(m.name);
                 return {
                     url: m.url,
-                    title: `🌐 Sursă IPTV ${quality ? `[${quality}]` : '[Standard]'}`
+                    title: `🌐 Sursă IPTV ${quality ? `— ${quality}` : '— Standard'}`
                 };
             })
         };
