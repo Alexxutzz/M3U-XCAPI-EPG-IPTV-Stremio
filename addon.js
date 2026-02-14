@@ -1,8 +1,7 @@
-// IPTV Stremio Addon Core - Enhanced EPG with Progress Bar & Time
+// IPTV Stremio Addon Core - All Channels & Enhanced EPG
 require('dotenv').config();
 
 const { addonBuilder } = require("stremio-addon-sdk");
-const crypto = require("crypto");
 const LRUCache = require("./lruCache");
 const fetch = require('node-fetch');
 
@@ -19,59 +18,40 @@ class M3UEPGAddon {
         this.channels = [];
         this.movies = [];
         this.series = [];
-        this.epgData = {};
         this.lastUpdate = 0;
     }
 
-    // --- FUNCTII AJUTATOARE PENTRU TIMP SI DESIGN ---
+    // --- UTILS PENTRU DESIGN EPG ---
     formatTime(date) {
-        if (!date) return "--:--";
-        return date.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit', hour12: false });
+        return date ? date.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' }) : "--:--";
     }
 
     getProgressBar(start, end) {
         const now = new Date();
-        if (now < start) return "░░░░░░░░░░ 0%";
-        if (now > end) return "██████████ 100%";
-        
         const total = end - start;
         const elapsed = now - start;
-        const percent = Math.floor((elapsed / total) * 100);
-        
-        const dots = 10;
-        const filled = Math.round((percent / 100) * dots);
-        const empty = dots - filled;
-        
-        return `${"█".repeat(filled)}${"░".repeat(empty)} ${percent}%`;
+        const progress = Math.max(0, Math.min(100, Math.round((elapsed / total) * 100)));
+        const filled = Math.round(progress / 10);
+        return `${"█".repeat(filled)}${"░".repeat(10 - filled)} ${progress}%`;
     }
 
     async getXtreamEpg(streamId) {
         if (this.providerName !== 'xtream') return null;
-        
         const url = `${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_short_epg&stream_id=${streamId}`;
         
         try {
-            const response = await fetch(url, {
-                headers: { 'User-Agent': 'IPTVSmarters/1.0.3' },
-                timeout: 5000 
-            });
-
+            const response = await fetch(url, { headers: { 'User-Agent': 'IPTVSmarters/1.0.3' }, timeout: 4000 });
             const data = await response.json();
-            
-            if (!data || !data.epg_listings || data.epg_listings.length === 0) {
-                return null;
+            if (data && data.epg_listings && data.epg_listings.length > 0) {
+                return data.epg_listings.map(prog => ({
+                    title: prog.title ? Buffer.from(prog.title, 'base64').toString('utf-8') : "Program",
+                    description: prog.description ? Buffer.from(prog.description, 'base64').toString('utf-8') : "",
+                    startTime: new Date(prog.start),
+                    stopTime: new Date(prog.end)
+                }));
             }
-
-            return data.epg_listings.map(prog => ({
-                title: prog.title ? Buffer.from(prog.title, 'base64').toString('utf-8') : "Program TV",
-                description: prog.description ? Buffer.from(prog.description, 'base64').toString('utf-8') : "",
-                startTime: prog.start ? new Date(prog.start) : null,
-                stopTime: prog.end ? new Date(prog.end) : null
-            }));
-        } catch (e) {
-            console.error('[EPG ERROR]', e.message);
-            return null;
-        }
+        } catch (e) { console.error('[EPG ERROR]', e.message); }
+        return null;
     }
 
     async updateData(force = false) {
@@ -79,12 +59,13 @@ class M3UEPGAddon {
         if (!force && this.lastUpdate && now - this.lastUpdate < 900000) return;
 
         try {
+            console.log('[INFO] Fetching all channels from provider...');
             const providerModule = require(`./src/js/providers/${this.providerName}Provider.js`);
             await providerModule.fetchData(this);
+
             this.lastUpdate = Date.now();
-        } catch (e) {
-            console.error('[CRITICAL UPDATE ERROR]', e);
-        }
+            console.log('[INFO] Success. Total channels loaded:', this.channels.length);
+        } catch (e) { console.error('[CRITICAL ERROR]', e); }
     }
 
     generateMetaPreview(item) {
@@ -98,46 +79,28 @@ class M3UEPGAddon {
     }
 
     async getDetailedMeta(id) {
-        const all = [...this.channels, ...this.movies, ...this.series];
-        const item = all.find(i => i.id === id);
-        
+        const item = [...this.channels, ...this.movies].find(i => i.id === id);
         if (!item) return null;
 
         const meta = this.generateMetaPreview(item);
-
         if (item.type === 'tv' || id.includes('live')) {
             const streamId = id.split('_').pop();
-            const xtreamPrograms = await this.getXtreamEpg(streamId);
+            const epg = await this.getXtreamEpg(streamId);
             
-            let description = `📺 CANAL: ${item.name}\n`;
-            description += `──────────────────────────\n`;
+            let desc = `📺 CANAL: ${item.name}\n`;
+            if (item.attributes?.['group-title']) desc += `📂 GRUP: ${item.attributes['group-title']}\n`;
+            desc += `──────────────────────────\n`;
 
-            if (xtreamPrograms && xtreamPrograms.length > 0) {
-                const current = xtreamPrograms[0];
-                const start = this.formatTime(current.startTime);
-                const end = this.formatTime(current.stopTime);
-                const progress = this.getProgressBar(current.startTime, current.stopTime);
-
-                description += `🔴 ACUM: ${current.title}\n`;
-                description += `⏰ ORA: ${start} - ${end}\n`;
-                description += `📊 PROGRES: ${progress}\n\n`;
-                description += `📝 INFO: ${current.description || 'Fără descriere'}\n`;
-                
-                if (xtreamPrograms.length > 1) {
-                    description += `──────────────────────────\n`;
-                    description += `📅 URMEAZĂ:\n`;
-                    xtreamPrograms.slice(1, 5).forEach(p => {
-                        const s = this.formatTime(p.startTime);
-                        description += `• ${s} - ${p.title}\n`;
-                    });
+            if (epg && epg[0]) {
+                const cur = epg[0];
+                desc += `🔴 ACUM: ${cur.title}\n⏰ ${this.formatTime(cur.startTime)} - ${this.formatTime(cur.stopTime)}\n📊 ${this.getProgressBar(cur.startTime, cur.stopTime)}\n\n📝 ${cur.description}\n`;
+                if (epg.length > 1) {
+                    desc += `──────────────────────────\n📅 URMEAZĂ:\n`;
+                    epg.slice(1, 4).forEach(p => desc += `• ${this.formatTime(p.startTime)} - ${p.title}\n`);
                 }
-            } else {
-                description += `📡 Informații program indisponibile.`;
-            }
-            
-            meta.description = description;
+            } else { desc += "📡 Program indisponibil."; }
+            meta.description = desc;
         }
-
         return meta;
     }
 }
@@ -145,10 +108,10 @@ class M3UEPGAddon {
 async function createAddon(config) {
     const manifest = {
         id: ADDON_ID,
-        version: "2.1.2",
+        version: "2.1.4",
         name: ADDON_NAME,
         resources: ["catalog", "stream", "meta"],
-        types: ["tv", "movie", "series"],
+        types: ["tv", "movie"],
         catalogs: [
             { type: 'tv', id: 'iptv_channels', name: 'IPTV Channels', extra: [{ name: 'search' }] },
             { type: 'movie', id: 'iptv_movies', name: 'IPTV Movies', extra: [{ name: 'search' }] }
@@ -158,41 +121,25 @@ async function createAddon(config) {
 
     const builder = new addonBuilder(manifest);
     const addonInstance = new M3UEPGAddon(config, manifest);
-
     await addonInstance.updateData(true);
 
     builder.defineCatalogHandler(async (args) => {
-        addonInstance.updateData().catch(() => {});
-        
-        let items = [];
-        if (args.type === 'tv') items = addonInstance.channels;
-        if (args.type === 'movie') items = addonInstance.movies;
-
-        if (args.extra && args.extra.search) {
+        let items = args.type === 'tv' ? addonInstance.channels : addonInstance.movies;
+        if (args.extra?.search) {
             const q = args.extra.search.toLowerCase();
             items = items.filter(i => i.name.toLowerCase().includes(q));
         }
-
-        return { metas: items.slice(0, 100).map(i => addonInstance.generateMetaPreview(i)) };
+        // Limităm afișarea la 500 pentru a nu bloca interfața Stremio
+        return { metas: items.slice(0, 500).map(i => addonInstance.generateMetaPreview(i)) };
     });
 
     builder.defineStreamHandler(async ({ id }) => {
-        const all = [...addonInstance.channels, ...addonInstance.movies, ...addonInstance.series];
-        const item = all.find(i => i.id === id);
-        if (!item) return { streams: [] };
-
-        return { 
-            streams: [{ 
-                url: item.url, 
-                title: item.name,
-                behaviorHints: { notWebReady: true }
-            }] 
-        };
+        const item = [...addonInstance.channels, ...addonInstance.movies].find(i => i.id === id);
+        return { streams: item ? [{ url: item.url, title: item.name }] : [] };
     });
 
     builder.defineMetaHandler(async ({ id }) => {
-        const meta = await addonInstance.getDetailedMeta(id);
-        return { meta };
+        return { meta: await addonInstance.getDetailedMeta(id) };
     });
 
     return builder.getInterface();
