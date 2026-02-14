@@ -1,4 +1,4 @@
-// IPTV Stremio Addon Core - Fixed Channel Loading & EPG
+// IPTV Stremio Addon Core - Enhanced EPG with Progress Bar & Time
 require('dotenv').config();
 
 const { addonBuilder } = require("stremio-addon-sdk");
@@ -6,7 +6,6 @@ const crypto = require("crypto");
 const LRUCache = require("./lruCache");
 const fetch = require('node-fetch');
 
-// 1. Singleton pentru Cache
 const dataCache = new LRUCache({ max: 500, ttl: 6 * 3600 * 1000 });
 
 const ADDON_NAME = "M3U/EPG TV Addon";
@@ -24,7 +23,29 @@ class M3UEPGAddon {
         this.lastUpdate = 0;
     }
 
-   async getXtreamEpg(streamId) {
+    // --- FUNCTII AJUTATOARE PENTRU TIMP SI DESIGN ---
+    formatTime(date) {
+        if (!date) return "--:--";
+        return date.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit', hour12: false });
+    }
+
+    getProgressBar(start, end) {
+        const now = new Date();
+        if (now < start) return "░░░░░░░░░░ 0%";
+        if (now > end) return "██████████ 100%";
+        
+        const total = end - start;
+        const elapsed = now - start;
+        const percent = Math.floor((elapsed / total) * 100);
+        
+        const dots = 10;
+        const filled = Math.round((percent / 100) * dots);
+        const empty = dots - filled;
+        
+        return `${"█".repeat(filled)}${"░".repeat(empty)} ${percent}%`;
+    }
+
+    async getXtreamEpg(streamId) {
         if (this.providerName !== 'xtream') return null;
         
         const url = `${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_short_epg&stream_id=${streamId}`;
@@ -37,14 +58,12 @@ class M3UEPGAddon {
 
             const data = await response.json();
             
-            // Dacă lista e goală, logăm asta ca să știm sigur
             if (!data || !data.epg_listings || data.epg_listings.length === 0) {
-                console.log(`[EPG] Serverul a răspuns corect, dar nu există program pentru canalul ${streamId}`);
                 return null;
             }
 
             return data.epg_listings.map(prog => ({
-                title: prog.title ? Buffer.from(prog.title, 'base64').toString('utf-8') : "Program",
+                title: prog.title ? Buffer.from(prog.title, 'base64').toString('utf-8') : "Program TV",
                 description: prog.description ? Buffer.from(prog.description, 'base64').toString('utf-8') : "",
                 startTime: prog.start ? new Date(prog.start) : null,
                 stopTime: prog.end ? new Date(prog.end) : null
@@ -57,16 +76,12 @@ class M3UEPGAddon {
 
     async updateData(force = false) {
         const now = Date.now();
-        // Evităm update-urile prea dese (minim 15 min între ele)
         if (!force && this.lastUpdate && now - this.lastUpdate < 900000) return;
 
         try {
-            console.log('[INFO] Fetching data from provider:', this.providerName);
-            // IMPORTĂ PROVIDERUL DIN SRC (Asigură-te că calea e corectă!)
             const providerModule = require(`./src/js/providers/${this.providerName}Provider.js`);
             await providerModule.fetchData(this);
             this.lastUpdate = Date.now();
-            console.log('[INFO] Data updated. Channels:', this.channels.length);
         } catch (e) {
             console.error('[CRITICAL UPDATE ERROR]', e);
         }
@@ -83,7 +98,6 @@ class M3UEPGAddon {
     }
 
     async getDetailedMeta(id) {
-        // Căutăm în toate listele
         const all = [...this.channels, ...this.movies, ...this.series];
         const item = all.find(i => i.id === id);
         
@@ -95,16 +109,32 @@ class M3UEPGAddon {
             const streamId = id.split('_').pop();
             const xtreamPrograms = await this.getXtreamEpg(streamId);
             
-            let description = `📺 CHANNEL: ${item.name}`;
-            if (xtreamPrograms && xtreamPrograms[0]) {
+            let description = `📺 CANAL: ${item.name}\n`;
+            description += `──────────────────────────\n`;
+
+            if (xtreamPrograms && xtreamPrograms.length > 0) {
                 const current = xtreamPrograms[0];
-                description += `\n\n🔴 ACUM: ${current.title}\n${current.description}`;
+                const start = this.formatTime(current.startTime);
+                const end = this.formatTime(current.stopTime);
+                const progress = this.getProgressBar(current.startTime, current.stopTime);
+
+                description += `🔴 ACUM: ${current.title}\n`;
+                description += `⏰ ORA: ${start} - ${end}\n`;
+                description += `📊 PROGRES: ${progress}\n\n`;
+                description += `📝 INFO: ${current.description || 'Fără descriere'}\n`;
                 
                 if (xtreamPrograms.length > 1) {
-                    description += '\n\n📅 URMEAZĂ:\n' + xtreamPrograms.slice(1, 4)
-                        .map(p => `- ${p.title}`).join('\n');
+                    description += `──────────────────────────\n`;
+                    description += `📅 URMEAZĂ:\n`;
+                    xtreamPrograms.slice(1, 5).forEach(p => {
+                        const s = this.formatTime(p.startTime);
+                        description += `• ${s} - ${p.title}\n`;
+                    });
                 }
+            } else {
+                description += `📡 Informații program indisponibile.`;
             }
+            
             meta.description = description;
         }
 
@@ -115,7 +145,7 @@ class M3UEPGAddon {
 async function createAddon(config) {
     const manifest = {
         id: ADDON_ID,
-        version: "2.1.1",
+        version: "2.1.2",
         name: ADDON_NAME,
         resources: ["catalog", "stream", "meta"],
         types: ["tv", "movie", "series"],
@@ -129,11 +159,9 @@ async function createAddon(config) {
     const builder = new addonBuilder(manifest);
     const addonInstance = new M3UEPGAddon(config, manifest);
 
-    // Inițializare date
     await addonInstance.updateData(true);
 
     builder.defineCatalogHandler(async (args) => {
-        // Forțăm un refresh silențios dacă datele sunt vechi
         addonInstance.updateData().catch(() => {});
         
         let items = [];
