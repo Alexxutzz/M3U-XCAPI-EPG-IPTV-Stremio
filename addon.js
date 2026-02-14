@@ -1,17 +1,15 @@
-// IPTV Stremio Addon - Vercel Optimized Version (TV + Movies + Series)
+// IPTV Stremio Addon - Vercel Optimized (ONLY LIVE TV + EPG)
 require('dotenv').config();
 const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
-const ADDON_NAME = "IPTV Xtream Optimized";
-const ADDON_ID = "org.stremio.xtream-full-optimized";
+const ADDON_NAME = "IPTV Live Romania"; // Poți schimba numele aici
+const ADDON_ID = "org.stremio.live-only.optimized";
 
 class M3UEPGAddon {
     constructor(config = {}) {
         this.config = config;
         this.channels = [];
-        this.movies = [];
-        this.series = [];
         this.lastUpdate = 0;
     }
 
@@ -38,8 +36,8 @@ class M3UEPGAddon {
     }
 
     async updateData() {
-        // Cache 15 minute pentru a evita blocarea IP-ului de către furnizor
-        if (Date.now() - this.lastUpdate < 900000) return; 
+        // Cache 20 minute
+        if (Date.now() - this.lastUpdate < 1200000) return; 
         try {
             const provider = require(`./src/js/providers/xtreamProvider.js`);
             await provider.fetchData(this);
@@ -52,26 +50,20 @@ async function createAddon(config) {
     const addon = new M3UEPGAddon(config);
     const builder = new addonBuilder({
         id: ADDON_ID,
-        version: "3.0.0",
+        version: "3.1.0",
         name: ADDON_NAME,
         resources: ["catalog", "stream", "meta"],
-        types: ["tv", "movie", "series"],
+        types: ["tv"],
         catalogs: [
-            { type: 'tv', id: 'iptv_channels', name: 'Live TV', extra: [{ name: 'search' }] },
-            { type: 'movie', id: 'iptv_movies', name: 'Filme IPTV', extra: [{ name: 'search' }] },
-            { type: 'series', id: 'iptv_series', name: 'Seriale IPTV', extra: [{ name: 'search' }] }
+            { type: 'tv', id: 'iptv_channels', name: 'Canale TV Live', extra: [{ name: 'search' }] }
         ],
         idPrefixes: ["iptv_"]
     });
 
-    // --- HANDLER CATALOGOAGE ---
+    // --- HANDLER CATALOG ---
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
-        let results = [];
-        
-        if (args.type === 'tv') results = addon.channels;
-        else if (args.type === 'movie') results = addon.movies;
-        else if (args.type === 'series') results = addon.series;
+        let results = addon.channels;
 
         if (args.extra?.search) {
             const q = args.extra.search.toLowerCase();
@@ -79,85 +71,50 @@ async function createAddon(config) {
         }
 
         return { 
-            metas: results.slice(0, 300).map(i => ({
+            metas: results.slice(0, 500).map(i => ({
                 id: i.id,
-                type: i.type,
+                type: 'tv',
                 name: i.name,
-                poster: i.poster || i.logo || ""
+                poster: i.logo || ""
             }))
         };
     });
 
-    // --- HANDLER META (Detalii + EPG + Episoade) ---
-    builder.defineMetaHandler(async ({ type, id }) => {
+    // --- HANDLER META (Detalii Canal + EPG) ---
+    builder.defineMetaHandler(async ({ id }) => {
         await addon.updateData();
-        let item;
+        const item = addon.channels.find(i => i.id === id);
+        if (!item) return { meta: null };
+
+        const streamId = id.split('_').pop();
+        const epg = await addon.getXtreamEpg(streamId);
         
-        if (type === 'tv') {
-            item = addon.channels.find(i => i.id === id);
-            if (!item) return { meta: null };
+        let description = `📺 Canal: ${item.name}\n📂 Categorie: ${item.category || 'Live'}\n`;
+        description += `──────────────────────────\n`;
 
-            const streamId = id.split('_').pop();
-            const epg = await addon.getXtreamEpg(streamId);
+        if (epg && epg[0]) {
+            const cur = epg[0];
+            const s = cur.start.toLocaleTimeString('ro-RO', {hour:'2-digit', minute:'2-digit'});
+            const e = cur.end.toLocaleTimeString('ro-RO', {hour:'2-digit', minute:'2-digit'});
+            description += `🔴 ACUM: ${cur.title}\n⏰ ${s} - ${e}\n📊 ${addon.getProgressBar(cur.start, cur.end)}\n\n📝 ${cur.desc}\n`;
             
-            let description = `📺 Canal: ${item.name}\n📂 Categorie: ${item.category || 'Live'}\n`;
-            description += `──────────────────────────\n`;
-
-            if (epg && epg[0]) {
-                const cur = epg[0];
-                const s = cur.start.toLocaleTimeString('ro-RO', {hour:'2-digit', minute:'2-digit'});
-                const e = cur.end.toLocaleTimeString('ro-RO', {hour:'2-digit', minute:'2-digit'});
-                description += `🔴 ACUM: ${cur.title}\n⏰ ${s} - ${e}\n📊 ${addon.getProgressBar(cur.start, cur.end)}\n\n📝 ${cur.desc}\n`;
-                
-                if (epg.length > 1) {
-                    description += `──────────────────────────\n📅 URMEAZĂ:\n`;
-                    epg.slice(1, 4).forEach(p => {
-                        description += `• ${p.start.toLocaleTimeString('ro-RO', {hour:'2-digit', minute:'2-digit'})} - ${p.title}\n`;
-                    });
-                }
-            } else {
-                description += `📡 EPG indisponibil momentan.`;
+            if (epg.length > 1) {
+                description += `──────────────────────────\n📅 URMEAZĂ:\n`;
+                epg.slice(1, 4).forEach(p => {
+                    description += `• ${p.start.toLocaleTimeString('ro-RO', {hour:'2-digit', minute:'2-digit'})} - ${p.title}\n`;
+                });
             }
-            return { meta: { id, type, name: item.name, description, poster: item.logo || "" } };
-        } 
-        
-        if (type === 'movie') {
-            item = addon.movies.find(i => i.id === id);
-            return { meta: { id, type, name: item?.name, description: item?.description, poster: item?.poster } };
+        } else {
+            description += `📡 Ghid TV (EPG) indisponibil momentan pentru acest canal.`;
         }
 
-        if (type === 'series') {
-            item = addon.series.find(i => i.id === id);
-            if (!item) return { meta: null };
-            
-            const provider = require(`./src/js/providers/xtreamProvider.js`);
-            const info = await provider.fetchSeriesInfo(addon, item.series_id);
-            
-            return { meta: { 
-                id, 
-                type, 
-                name: item.name, 
-                description: item.description, 
-                poster: item.poster,
-                videos: info.videos // Aici se încarcă episoadele
-            }};
-        }
-
-        return { meta: null };
+        return { meta: { id, type: 'tv', name: item.name, description, poster: item.logo || "" } };
     });
 
     // --- HANDLER STREAM ---
     builder.defineStreamHandler(async ({ id }) => {
-        // Dacă e episod de serial, URL-ul este deja în obiectul video din Meta
-        if (id.startsWith('iptv_series_ep_')) {
-            return { streams: [] }; // Stremio preia URL-ul direct din meta.videos
-        }
-
-        const item = [...addon.channels, ...addon.movies].find(i => i.id === id);
-        if (item && item.url) {
-            return { streams: [{ url: item.url, title: item.name }] };
-        }
-        return { streams: [] };
+        const item = addon.channels.find(i => i.id === id);
+        return { streams: item ? [{ url: item.url, title: item.name }] : [] };
     });
 
     return builder.getInterface();
