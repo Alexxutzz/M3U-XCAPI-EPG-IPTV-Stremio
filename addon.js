@@ -3,16 +3,23 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
 const ADDON_NAME = "IPTV Stremio";
-const ADDON_ID = "org.stremio.iptv.pro.v240";
-const VERSION = "2.4.0";
+const ADDON_ID = "org.stremio.iptv.pro.v242";
+const VERSION = "2.4.2";
 const RO_TIME = { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Bucharest', hour12: false };
 
-// --- CONFIGURARE CANALE RECOMANDATE (ROMÂNIA + ANGLIA SPORT) ---
+// --- CONFIGURARE CANALE RECOMANDATE (DOAR CELE SOLICITATE) ---
 const FEATURED_CHANNELS = [
-    "PRO TV", "DIGI SPORT 1", "DIGI SPORT 2", "DIGI SPORT 3", "DIGI SPORT 4",
-    "ANTENA 1", "HBO", "SKY SPORTS MAIN EVENT", "SKY SPORTS PREMIER LEAGUE", 
-    "SKY SPORTS FOOTBALL", "SKY SPORTS F1", "TNT SPORTS 1", "TNT SPORTS 2", 
-    "EUROSPORT", "KANAL D", "PRIMA TV"
+    "SKY SPORTS MAIN EVENT", 
+    "SKY SPORTS PREMIER LEAGUE", 
+    "SKY SPORTS FOOTBALL", 
+    "TNT SPORTS 1", 
+    "TNT SPORTS 2",
+    "PRO TV", 
+    "DIGI SPORT 1", 
+    "DIGI SPORT 2", 
+    "DIGI SPORT 3", 
+    "DIGI SPORT 4",
+    "ANTENA 1"
 ];
 
 const cleanChannelName = (name) => {
@@ -24,7 +31,6 @@ const cleanChannelName = (name) => {
     else if (lower.includes("fhd") || lower.includes("1080")) quality = "Full HD";
     else if (lower.includes("hd") || lower.includes("720")) quality = "HD Quality";
 
-    // Curățare inteligentă: eliminăm prefixele de țară doar dacă sunt urmate de separator clar
     let clean = name
         .replace(/^(RO|UK|US|IT|FR|ES|DE)[:| \-|\|]+/gi, '') 
         .replace(/FHD|HD|SD|1080p|720p|4K|UHD|H\.265|HEVC|BACKUP|ALT/gi, '')
@@ -46,13 +52,6 @@ class M3UEPGAddon {
         this.config = config;
         this.channels = [];
         this.lastUpdate = 0;
-    }
-
-    getProgressBar(start, end) {
-        const now = new Date();
-        const progress = Math.max(0, Math.min(100, Math.round(((now - start) / (end - start)) * 100)));
-        const filled = Math.round(progress / 10);
-        return `${"🔵".repeat(filled)}${"⚪".repeat(10 - filled)} ${progress}%`;
     }
 
     async updateData() {
@@ -83,9 +82,7 @@ class M3UEPGAddon {
 async function createAddon(config) {
     const addon = new M3UEPGAddon(config);
     const builder = new addonBuilder({
-        id: ADDON_ID,
-        version: VERSION,
-        name: ADDON_NAME,
+        id: ADDON_ID, version: VERSION, name: ADDON_NAME,
         resources: ["catalog", "stream", "meta"],
         types: ["tv"],
         catalogs: [
@@ -102,16 +99,20 @@ async function createAddon(config) {
 
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
-        const q = args.extra?.search ? args.extra.search.toLowerCase() : "";
-        const g = args.extra?.genre ? args.extra.genre.toLowerCase() : "";
+        const searchInput = args.extra?.search ? args.extra.search.toLowerCase() : "";
+        const genreInput = args.extra?.genre ? args.extra.genre.toLowerCase() : "";
 
         let results = [];
-        if (q) {
-            results = addon.channels.filter(i => i.name.toLowerCase().includes(q));
-        } else if (g) {
-            results = addon.channels.filter(i => (i.attributes?.['group-title'] || "").toLowerCase().includes(g));
+        if (searchInput) {
+            const searchWords = searchInput.split(/\s+/).filter(word => word.length > 0);
+            results = addon.channels.filter(item => {
+                const channelNameLower = item.name.toLowerCase();
+                return searchWords.every(word => channelNameLower.includes(word));
+            });
+        } else if (genreInput) {
+            results = addon.channels.filter(i => (i.attributes?.['group-title'] || "").toLowerCase().includes(genreInput));
         } else {
-            // Featured channels filter
+            // Modul Discover cu noua listă restrânsă
             results = addon.channels.filter(i => FEATURED_CHANNELS.some(f => i.name.toUpperCase().includes(f)));
         }
 
@@ -122,23 +123,19 @@ async function createAddon(config) {
                 const logo = getSmartLogo(baseName, item.attributes?.['tvg-logo'] || item.logo);
                 unique.set(baseName, {
                     id: `group_${Buffer.from(baseName).toString('hex')}`,
-                    type: 'tv',
-                    name: baseName,
-                    poster: logo,
-                    posterShape: 'square'
+                    type: 'tv', name: baseName, poster: logo, posterShape: 'square'
                 });
             }
         });
 
         let finalMetas = Array.from(unique.values());
-        if (!q && !g) {
+        if (!searchInput && !genreInput) {
             finalMetas.sort((a, b) => {
                 const indexA = FEATURED_CHANNELS.findIndex(f => a.name.toUpperCase().includes(f));
                 const indexB = FEATURED_CHANNELS.findIndex(f => b.name.toUpperCase().includes(f));
                 return indexA - indexB;
             });
         }
-
         return { metas: finalMetas.slice(0, 100) };
     });
 
@@ -146,19 +143,22 @@ async function createAddon(config) {
         if (!id.startsWith("group_")) return { meta: null };
         const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
         const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
-        
         if (matches.length === 0) return { meta: null };
+        
         const first = matches[0];
         const logo = getSmartLogo(targetName, first.attributes?.['tvg-logo'] || first.logo);
         const streamId = first.id.split('_').pop();
         const epg = await addon.getXtreamEpg(streamId);
         const now = new Date();
-        const oraRO = now.toLocaleTimeString('ro-RO', RO_TIME);
 
-        let description = `🕒 ORA RO: ${oraRO}\n📺 CANAL: ${targetName}\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+        let description = `🕒 ORA RO: ${now.toLocaleTimeString('ro-RO', RO_TIME)}\n📺 CANAL: ${targetName}\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
         if (epg && epg.length > 0) {
             const cur = epg.find(p => now >= p.start && now <= p.end) || epg[0];
-            description += `🔴 ACUM: ${cur.title.toUpperCase()}\n⏰ ${cur.start.toLocaleTimeString('ro-RO', RO_TIME)} — ${cur.end.toLocaleTimeString('ro-RO', RO_TIME)}\n${addon.getProgressBar(cur.start, cur.end)}\n\n`;
+            const elapsed = now - cur.start;
+            const progress = Math.max(0, Math.min(100, Math.round((elapsed / (cur.end - cur.start)) * 100)));
+            const bar = "🔵".repeat(Math.round(progress/10)) + "⚪".repeat(10 - Math.round(progress/10));
+            
+            description += `🔴 ACUM: ${cur.title.toUpperCase()}\n⏰ ${cur.start.toLocaleTimeString('ro-RO', RO_TIME)} — ${cur.end.toLocaleTimeString('ro-RO', RO_TIME)}\n${bar} ${progress}%\n\n`;
             if (cur.desc) description += `ℹ️ INFO: ${cur.desc.substring(0, 150)}...\n\n`;
             const next = epg.filter(p => p.start > now).slice(0, 2);
             if (next.length > 0) {
@@ -171,8 +171,8 @@ async function createAddon(config) {
 
         return {
             meta: {
-                id, type: 'tv', name: targetName,
-                description, poster: logo, background: logo, logo: logo
+                id, type: 'tv', name: targetName, description, 
+                poster: logo, background: logo, logo: logo
             }
         };
     });
@@ -181,7 +181,6 @@ async function createAddon(config) {
         if (!id.startsWith("group_")) return { streams: [] };
         const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
         const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
-
         return {
             streams: matches.map(m => ({
                 url: m.url,
