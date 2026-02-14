@@ -1,19 +1,27 @@
-// IPTV Stremio Addon - Complete Vercel Optimized Version
+// IPTV Stremio Addon - Ora României Forțată
 require('dotenv').config();
 const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
-const ADDON_NAME = "PRO IPTV & EPG Plus";
-const ADDON_ID = "org.stremio.m3u-epg-pro";
+const ADDON_NAME = "PRO IPTV Romania";
+const ADDON_ID = "org.stremio.m3u-epg-ro";
+
+// Configurare globală pentru formatarea orei de România
+const RO_TIME_OPTS = { 
+    hour: '2-digit', 
+    minute: '2-digit', 
+    timeZone: 'Europe/Bucharest', 
+    hour12: false 
+};
 
 class M3UEPGAddon {
     constructor(config = {}) {
         this.config = config;
         this.channels = [];
+        this.categories = [];
         this.lastUpdate = 0;
     }
 
-    // Progres vizual îmbunătățit cu emoji
     getProgressBar(start, end) {
         const now = new Date();
         const total = end - start;
@@ -47,49 +55,56 @@ class M3UEPGAddon {
     }
 
     async updateData() {
-        if (Date.now() - this.lastUpdate < 1800000) return; // Cache 30 min
+        if (Date.now() - this.lastUpdate < 3600000 && this.channels.length > 0) return;
         try {
-            // Aici ar trebui să fie logica ta de fetch din xtreamProvider.js
-            // Exemplu simplu de integrare dacă metoda e internă:
-            const response = await fetch(`${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_live_streams`);
-            const streams = await response.json();
+            const catRes = await fetch(`${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_live_categories`);
+            this.categories = await catRes.json();
+
+            const streamRes = await fetch(`${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_live_streams`);
+            const streams = await streamRes.json();
             
             this.channels = streams.map(s => ({
                 id: `iptv_${s.stream_id}`,
                 name: s.name,
                 logo: s.stream_icon || "",
-                url: `${this.config.xtreamUrl}/live/${this.config.xtreamUsername}/${this.config.xtreamPassword}/${s.stream_id}.m3u8`,
-                group: s.category_id
+                url: `${this.config.xtreamUrl}/live/${this.config.xtreamUsername}/${this.config.xtreamPassword}/${s.stream_id}.ts`,
+                category: s.category_id
             }));
             
             this.lastUpdate = Date.now();
-        } catch (e) { console.error("Update Error:", e.message); }
+        } catch (e) { console.error("Eroare:", e.message); }
     }
 }
 
 async function createAddon(config) {
     const addon = new M3UEPGAddon(config);
+    await addon.updateData();
+
     const builder = new addonBuilder({
         id: ADDON_ID,
-        version: "3.1.0",
+        version: "3.3.0",
         name: ADDON_NAME,
         resources: ["catalog", "stream", "meta"],
         types: ["tv"],
         catalogs: [
             { 
                 type: 'tv', 
-                id: 'iptv_channels', 
-                name: '📺 Toate Canalele', 
-                extra: [{ name: 'search' }] 
+                id: 'iptv_all', 
+                name: '📺 IPTV Romania', 
+                extra: [{ name: 'search' }, { name: 'genre', options: addon.categories.map(c => c.category_name) }] 
             }
         ],
         idPrefixes: ["iptv_"]
     });
 
-    // CATALOG HANDLER
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
         let results = addon.channels;
+
+        if (args.extra?.genre) {
+            const category = addon.categories.find(c => c.category_name === args.extra.genre);
+            if (category) results = results.filter(i => i.category === category.category_id);
+        }
 
         if (args.extra?.search) {
             const q = args.extra.search.toLowerCase();
@@ -101,13 +116,12 @@ async function createAddon(config) {
                 id: i.id,
                 type: 'tv',
                 name: i.name,
-                poster: i.logo || "https://via.placeholder.com/300x450?text=Fara+Logo",
+                poster: i.logo || "https://via.placeholder.com/300x300?text=TV",
                 posterShape: 'square'
             }))
         };
     });
 
-    // META HANDLER (EPG COMPLEX + ORA)
     builder.defineMetaHandler(async ({ id }) => {
         const item = addon.channels.find(i => i.id === id);
         if (!item) return { meta: null };
@@ -116,9 +130,10 @@ async function createAddon(config) {
         const epgData = await addon.getXtreamEpg(streamId);
         
         const now = new Date();
-        const oraLocala = now.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' });
+        // ORA ROMÂNIEI
+        const oraLocala = now.toLocaleTimeString('ro-RO', RO_TIME_OPTS);
 
-        let metaDescription = `🕒 ORA ACTUALĂ: ${oraLocala}\n`;
+        let metaDescription = `🕒 ORA ROMÂNIEI: ${oraLocala}\n`;
         metaDescription += `📺 CANAL: ${item.name.toUpperCase()}\n`;
         metaDescription += `───────────────────────────\n`;
 
@@ -127,32 +142,26 @@ async function createAddon(config) {
             const current = currentIdx !== -1 ? epgData[currentIdx] : null;
 
             if (current) {
-                const s = current.start.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' });
-                const e = current.end.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' });
+                const s = current.start.toLocaleTimeString('ro-RO', RO_TIME_OPTS);
+                const e = current.end.toLocaleTimeString('ro-RO', RO_TIME_OPTS);
                 
-                metaDescription += `🔴 ACUM:\n🏷️ ${current.title}\n`;
+                metaDescription += `🔴 ACUM: ${current.title}\n`;
                 metaDescription += `⏰ [${s} - ${e}] (${current.duration} min)\n`;
                 metaDescription += `${addon.getProgressBar(current.start, current.end)}\n\n`;
                 metaDescription += `📝 ${current.desc || 'Fără descriere.'}\n`;
                 
                 const nextPrograms = epgData.slice(currentIdx + 1, currentIdx + 6);
                 if (nextPrograms.length > 0) {
-                    metaDescription += `\n📅 PROGRAM URMĂTOR:\n`;
+                    metaDescription += `\n📅 PROGRAM URMĂTOR (Ora RO):\n`;
                     nextPrograms.forEach(p => {
-                        const start = p.start.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' });
-                        const end = p.end.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' });
-                        metaDescription += `🔹 ${start} - ${end} | ${p.title}\n`;
+                        const startStr = p.start.toLocaleTimeString('ro-RO', RO_TIME_OPTS);
+                        const endStr = p.end.toLocaleTimeString('ro-RO', RO_TIME_OPTS);
+                        metaDescription += `🔹 ${startStr} - ${endStr} | ${p.title}\n`;
                     });
-                }
-            } else {
-                const nextUp = epgData.find(p => p.start > now);
-                if (nextUp) {
-                    const s = nextUp.start.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' });
-                    metaDescription += `⏭️ URMĂTORUL PROGRAM:\n🏷️ ${nextUp.title} la ora ${s}\n`;
                 }
             }
         } else {
-            metaDescription += `⚠️ EPG momentan indisponibil.`;
+            metaDescription += `⚠️ EPG indisponibil.`;
         }
 
         return { 
@@ -168,18 +177,10 @@ async function createAddon(config) {
         };
     });
 
-    // STREAM HANDLER
     builder.defineStreamHandler(async ({ id }) => {
         const item = addon.channels.find(i => i.id === id);
         if (!item) return { streams: [] };
-        
-        return { 
-            streams: [{ 
-                url: item.url, 
-                title: `Stream Direct: ${item.name}`,
-                behaviorHints: { notWebReady: true }
-            }] 
-        };
+        return { streams: [{ url: item.url, title: item.name }] };
     });
 
     return builder.getInterface();
