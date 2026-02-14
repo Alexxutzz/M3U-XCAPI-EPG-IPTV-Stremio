@@ -3,8 +3,8 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
 const ADDON_NAME = "IPTV Stremio PRO";
-const ADDON_ID = "org.stremio.iptv.xtream.v270";
-const VERSION = "2.7.0";
+const ADDON_ID = "org.stremio.iptv.4k.v280";
+const VERSION = "2.8.0";
 const RO_TIME = { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Bucharest', hour12: false };
 
 // --- CONFIGURARE CANALE RECOMANDATE ---
@@ -14,13 +14,12 @@ const FEATURED_CHANNELS = [
     "DIGI SPORT 3", "DIGI SPORT 4", "ANTENA 1"
 ];
 
-// --- CURĂȚARE NUME ȘI DETECTARE CALITATE ---
 const cleanChannelName = (name) => {
     if (!name) return { baseName: "Canal TV", quality: "" };
     let quality = "";
     const lower = name.toLowerCase();
     
-    if (lower.includes("4k")) quality = "4K UHD";
+    if (lower.includes("4k") || lower.includes("uhd")) quality = "4K UHD";
     else if (lower.includes("fhd") || lower.includes("1080")) quality = "Full HD";
     else if (lower.includes("hd") || lower.includes("720")) quality = "HD";
 
@@ -78,7 +77,8 @@ async function createAddon(config) {
             type: 'tv', 
             id: 'iptv_pro', 
             name: '📺 IPTV PRO', 
-            extra: [{ name: 'search' }, { name: 'genre', options: ['Sport', 'Filme', 'Documentare'] }] 
+            // Am adăugat categoria Ultra HD / 4K aici
+            extra: [{ name: 'search' }, { name: 'genre', options: ['Ultra HD / 4K', 'Sport', 'Filme', 'Documentare'] }] 
         }],
         idPrefixes: ["group_"]
     });
@@ -86,14 +86,21 @@ async function createAddon(config) {
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
         const searchInput = args.extra?.search ? args.extra.search.toLowerCase() : "";
-        const genreInput = args.extra?.genre ? args.extra.genre.toLowerCase() : "";
+        const genreInput = args.extra?.genre ? args.extra.genre : "";
 
         let results = [];
+
+        // Logica de filtrare
         if (searchInput) {
             const words = searchInput.split(/\s+/).filter(w => w.length > 0);
             results = addon.channels.filter(item => words.every(word => item.name.toLowerCase().includes(word)));
+        } else if (genreInput === 'Ultra HD / 4K') {
+            // Filtrare specială pentru 4K/UHD
+            results = addon.channels.filter(i => 
+                i.name.toUpperCase().includes("4K") || i.name.toUpperCase().includes("UHD")
+            );
         } else if (genreInput) {
-            results = addon.channels.filter(i => (i.attributes?.['group-title'] || "").toLowerCase().includes(genreInput));
+            results = addon.channels.filter(i => (i.attributes?.['group-title'] || "").toLowerCase().includes(genreInput.toLowerCase()));
         } else {
             results = addon.channels.filter(i => FEATURED_CHANNELS.some(f => i.name.toUpperCase().includes(f)));
         }
@@ -102,7 +109,6 @@ async function createAddon(config) {
         results.forEach(item => {
             const { baseName } = cleanChannelName(item.name);
             if (!unique.has(baseName)) {
-                // Folosește DOAR logoul furnizat de Xtream (tvg-logo)
                 const logo = item.attributes?.['tvg-logo'] || item.logo;
                 unique.set(baseName, {
                     id: `group_${Buffer.from(baseName).toString('hex')}`,
@@ -114,15 +120,7 @@ async function createAddon(config) {
             }
         });
 
-        let finalMetas = Array.from(unique.values());
-        if (!searchInput && !genreInput) {
-            finalMetas.sort((a, b) => {
-                const indexA = FEATURED_CHANNELS.findIndex(f => a.name.toUpperCase().includes(f));
-                const indexB = FEATURED_CHANNELS.findIndex(f => b.name.toUpperCase().includes(f));
-                return indexA - indexB;
-            });
-        }
-        return { metas: finalMetas.slice(0, 100) };
+        return { metas: Array.from(unique.values()).slice(0, 100) };
     });
 
     builder.defineMetaHandler(async ({ id }) => {
@@ -152,8 +150,15 @@ async function createAddon(config) {
     builder.defineStreamHandler(async ({ id }) => {
         const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
         const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
+        // Sortăm sursele astfel încât 4K să fie prima opțiune în lista de stream-uri
+        const sortedMatches = matches.sort((a, b) => {
+            const isA4k = a.name.toUpperCase().includes("4K") || a.name.toUpperCase().includes("UHD");
+            const isB4k = b.name.toUpperCase().includes("4K") || b.name.toUpperCase().includes("UHD");
+            return isB4k - isA4k;
+        });
+
         return { 
-            streams: matches.map(m => ({ 
+            streams: sortedMatches.map(m => ({ 
                 url: m.url, 
                 title: `Sursă ${cleanChannelName(m.name).quality || 'Standard'}` 
             })) 
