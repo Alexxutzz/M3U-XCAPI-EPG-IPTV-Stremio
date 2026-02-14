@@ -124,28 +124,66 @@ async function createAddon(config) {
     });
 
     builder.defineMetaHandler(async ({ id }) => {
-        const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
-        const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
-        if (matches.length === 0) return { meta: null };
-        
-        const logo = matches[0].attributes?.['tvg-logo'] || matches[0].logo;
-        const streamId = matches[0].id.split('_').pop();
-        const epg = await addon.getXtreamEpg(streamId);
-        const now = new Date();
+    const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
+    const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
+    if (matches.length === 0) return { meta: null };
+    
+    const logo = matches[0].attributes?.['tvg-logo'] || matches[0].logo;
+    const streamId = matches[0].id.split('_').pop();
+    const epg = await addon.getXtreamEpg(streamId);
+    const now = new Date();
 
-        let description = `🕒 ORA RO: ${now.toLocaleTimeString('ro-RO', RO_TIME)}\n📺 CANAL: ${targetName}\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-        if (epg && epg.length > 0) {
-            const cur = epg.find(p => now >= p.start && now <= p.end) || epg[0];
-            const elapsed = now - cur.start;
-            const progress = Math.max(0, Math.min(100, Math.round((elapsed / (cur.end - cur.start)) * 100)));
-            const bar = "🔵".repeat(Math.round(progress/10)) + "⚪".repeat(10 - Math.round(progress/10));
-            description += `🔴 ACUM: ${cur.title.toUpperCase()}\n⏰ ${cur.start.toLocaleTimeString('ro-RO', RO_TIME)} — ${cur.end.toLocaleTimeString('ro-RO', RO_TIME)}\n${bar} ${progress}%\n\nℹ️ ${cur.desc.substring(0, 200)}`;
-        } else {
-            description += `📡 Ghidul TV (EPG) nu este disponibil.`;
+    // Header stilizat
+    let description = `📍 ACUM ÎN ROMÂNIA: ${now.toLocaleTimeString('ro-RO', RO_TIME)}\n`;
+    description += `📺 CANAL: ${targetName.toUpperCase()}\n`;
+    description += `━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+    if (epg && epg.length > 0) {
+        const cur = epg.find(p => now >= p.start && now <= p.end) || epg[0];
+        const next = epg[epg.indexOf(cur) + 1];
+
+        // Calcul progres
+        const total = cur.end - cur.start;
+        const elapsed = now - cur.start;
+        const percent = Math.max(0, Math.min(100, Math.round((elapsed / total) * 100)));
+        
+        // Bară de progres mai elegantă (stil modern)
+        const barLength = 12;
+        const filledSize = Math.round((percent / 100) * barLength);
+        const emptySize = barLength - filledSize;
+        const bar = "🔵".repeat(filledSize) + "⚪".repeat(emptySize);
+
+        // Detalii program curent
+        description += `🔴 ÎN DIFUZARE:\n`;
+        description += `**${cur.title.toUpperCase()}**\n`;
+        description += `🕒 ${cur.start.toLocaleTimeString('ro-RO', RO_TIME)} — ${cur.end.toLocaleTimeString('ro-RO', RO_TIME)}\n`;
+        description += `${bar}  ${percent}%\n\n`;
+
+        if (cur.desc) {
+            description += `📝 INFO: ${cur.desc.substring(0, 250).trim()}...\n\n`;
         }
 
-        return { meta: { id, type: 'tv', name: targetName, description, poster: logo, background: logo, logo: logo } };
-    });
+        // Programul următor (Adăugat pentru utilitate)
+        if (next) {
+            description += `━━━━━━━━━━━━━━━━━━━━━━\n`;
+            description += `⏭️ URMEAZĂ: ${next.title} (${next.start.toLocaleTimeString('ro-RO', RO_TIME)})`;
+        }
+    } else {
+        description += `📡 Ghidul TV (EPG) momentan indisponibil pentru acest canal.`;
+    }
+
+    return { 
+        meta: { 
+            id, 
+            type: 'tv', 
+            name: targetName, 
+            description, 
+            poster: logo, 
+            background: logo, 
+            logo: logo 
+        } 
+    };
+});
 
     builder.defineStreamHandler(async ({ id }) => {
         const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
