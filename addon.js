@@ -2,10 +2,9 @@ require('dotenv').config();
 const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
-const ADDON_NAME = "PRO IPTV RO Premium";
-const ADDON_ID = "org.stremio.m3u-epg-ro-final";
+const ADDON_NAME = "PRO IPTV RO";
+const ADDON_ID = "org.stremio.m3u-epg-ro";
 
-// Forțăm ora României peste tot
 const RO_TIME_OPTS = { 
     hour: '2-digit', 
     minute: '2-digit', 
@@ -18,9 +17,9 @@ class M3UEPGAddon {
         this.config = config;
         this.channels = [];
         this.lastUpdate = 0;
+        this.isUpdating = false;
     }
 
-    // Indicator vizual progres emisiune
     getProgressBar(start, end) {
         const now = new Date();
         const total = end - start;
@@ -31,14 +30,13 @@ class M3UEPGAddon {
         return `${"🟢".repeat(filled)}${"⚪".repeat(size - filled)} ${progress}%`;
     }
 
-    // Extragere EPG de pe serverul Xtream
     async getXtreamEpg(streamId) {
         const url = `${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_short_epg&stream_id=${streamId}`;
         try {
-            const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 4000 });
+            const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 3000 });
             const data = await res.json();
             if (!data || !data.epg_listings) return null;
-
+            
             const decode = (str) => {
                 try { return Buffer.from(str, 'base64').toString('utf-8'); }
                 catch(e) { return str; }
@@ -54,14 +52,15 @@ class M3UEPGAddon {
         } catch (e) { return null; }
     }
 
-    // Actualizare listă completă de canale
     async updateData() {
-        // Cache de 30 min pentru a nu bloca Vercel la fiecare accesare
+        if (this.isUpdating) return;
         if (Date.now() - this.lastUpdate < 1800000 && this.channels.length > 0) return;
         
+        this.isUpdating = true;
         try {
-            const streamRes = await fetch(`${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_live_streams`);
-            const streams = await streamRes.json();
+            const url = `${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_live_streams`;
+            const res = await fetch(url, { timeout: 10000 }); // Limită 10s
+            const streams = await res.json();
             
             if (Array.isArray(streams)) {
                 this.channels = streams.map(s => ({
@@ -71,58 +70,55 @@ class M3UEPGAddon {
                     url: `${this.config.xtreamUrl}/live/${this.config.xtreamUsername}/${this.config.xtreamPassword}/${s.stream_id}.ts`
                 }));
                 this.lastUpdate = Date.now();
-                console.log(`Succes: ${this.channels.length} canale încărcate.`);
             }
         } catch (e) {
-            console.error("Eroare la încărcarea canalelor:", e.message);
+            console.error("Fetch failed:", e.message);
+        } finally {
+            this.isUpdating = false;
         }
     }
 }
 
-async function createAddon(config) {
+// FUNCȚIA PRINCIPALĂ NU MAI ESTE ASYNC PENTRU MANIFEST (Esențial pentru viteza Vercel)
+function createAddon(config) {
     const addon = new M3UEPGAddon(config);
 
     const builder = new addonBuilder({
         id: ADDON_ID,
-        version: "4.0.0",
+        version: "4.1.0",
         name: ADDON_NAME,
-        description: "IPTV cu EPG complet, logo-uri și ora României.",
         resources: ["catalog", "stream", "meta"],
         types: ["tv"],
         catalogs: [
             { 
                 type: 'tv', 
                 id: 'iptv_search', 
-                name: '🔍 Toate Canalele / Căutare', 
-                extra: [{ name: 'search', isRequired: false }] 
+                name: '📺 Toate Canalele', 
+                extra: [{ name: 'search' }] 
             }
         ],
         idPrefixes: ["iptv_"]
     });
 
-    // --- HANDLER CATALOG (Căutare și Afișare) ---
     builder.defineCatalogHandler(async (args) => {
+        // Pornim update-ul dar nu blocăm totul dacă e prima dată
         await addon.updateData();
+        
         let results = addon.channels;
-
         if (args.extra?.search) {
-            const query = args.extra.search.toLowerCase();
-            results = results.filter(i => i.name.toLowerCase().includes(query));
+            const q = args.extra.search.toLowerCase();
+            results = results.filter(i => i.name.toLowerCase().includes(q));
         }
 
-        return { 
-            // Returnăm maxim 1000 de rezultate pentru a păstra viteza în aplicație
-            metas: results.slice(0, 1000).map(i => ({
-                id: i.id,
-                type: 'tv',
-                name: i.name,
-                poster: i.logo || "https://via.placeholder.com/400x400.png?text=Fara+Logo",
-                posterShape: 'square'
-            }))
-        };
+        return { metas: results.slice(0, 500).map(i => ({
+            id: i.id,
+            type: 'tv',
+            name: i.name,
+            poster: i.logo || "https://via.placeholder.com/300x300?text=TV",
+            posterShape: 'square'
+        }))};
     });
 
-    // --- HANDLER META (EPG Detaliat + Ora RO) ---
     builder.defineMetaHandler(async ({ id }) => {
         const item = addon.channels.find(i => i.id === id);
         if (!item) return { meta: null };
@@ -133,23 +129,14 @@ async function createAddon(config) {
         const now = new Date();
         const oraRo = now.toLocaleTimeString('ro-RO', RO_TIME_OPTS);
 
-        let desc = `🕒 ORA ROMÂNIEI: ${oraRo}\n`;
-        desc += `───────────────────────────\n`;
+        let desc = `🕒 ORA ROMÂNIEI: ${oraRo}\n───────────────────────────\n`;
 
         if (epgData && epgData.length > 0) {
-            const currentIdx = epgData.findIndex(p => now >= p.start && now <= p.end);
-            const current = currentIdx !== -1 ? epgData[currentIdx] : null;
-
+            const current = epgData.find(p => now >= p.start && now <= p.end);
             if (current) {
-                const s = current.start.toLocaleTimeString('ro-RO', RO_TIME_OPTS);
-                const e = current.end.toLocaleTimeString('ro-RO', RO_TIME_OPTS);
+                desc += `🔴 ACUM: ${current.title}\n⏰ [${current.start.toLocaleTimeString('ro-RO', RO_TIME_OPTS)} - ${current.end.toLocaleTimeString('ro-RO', RO_TIME_OPTS)}]\n${addon.getProgressBar(current.start, current.end)}\n\n📝 ${current.desc || ''}\n`;
                 
-                desc += `🔴 ACUM: ${current.title}\n`;
-                desc += `⏰ [${s} - ${e}] (${current.duration} min)\n`;
-                desc += `${addon.getProgressBar(current.start, current.end)}\n\n`;
-                desc += `📝 ${current.desc || 'Fără descriere.'}\n`;
-                
-                const next = epgData.slice(currentIdx + 1, currentIdx + 5);
+                const next = epgData.filter(p => p.start > now).slice(0, 4);
                 if (next.length > 0) {
                     desc += `───────────────────────────\n📅 URMEAZĂ:\n`;
                     next.forEach(p => {
@@ -158,28 +145,15 @@ async function createAddon(config) {
                 }
             }
         } else {
-            desc += `⚠️ EPG indisponibil pentru acest canal.`;
+            desc += `⚠️ EPG indisponibil.`;
         }
 
-        return { 
-            meta: { 
-                id, 
-                type: 'tv', 
-                name: item.name, 
-                description: desc, 
-                poster: item.logo,
-                background: item.logo,
-                logo: item.logo
-            } 
-        };
+        return { meta: { id, type: 'tv', name: item.name, description: desc, poster: item.logo, background: item.logo, logo: item.logo } };
     });
 
-    // --- HANDLER STREAM ---
     builder.defineStreamHandler(async ({ id }) => {
         const item = addon.channels.find(i => i.id === id);
-        return { 
-            streams: item ? [{ url: item.url, title: `Stream Direct: ${item.name}` }] : [] 
-        };
+        return { streams: item ? [{ url: item.url, title: item.name }] : [] };
     });
 
     return builder.getInterface();
