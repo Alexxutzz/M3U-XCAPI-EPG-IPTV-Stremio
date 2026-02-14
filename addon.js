@@ -3,8 +3,8 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
 const ADDON_NAME = "IPTV Stremio PRO";
-const ADDON_ID = "org.stremio.iptv.universal.v261";
-const VERSION = "2.6.1";
+const ADDON_ID = "org.stremio.iptv.xtream.v270";
+const VERSION = "2.7.0";
 const RO_TIME = { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Bucharest', hour12: false };
 
 // --- CONFIGURARE CANALE RECOMANDATE ---
@@ -13,19 +13,6 @@ const FEATURED_CHANNELS = [
     "TNT SPORTS 1", "TNT SPORTS 2", "PRO TV", "DIGI SPORT 1", "DIGI SPORT 2", 
     "DIGI SPORT 3", "DIGI SPORT 4", "ANTENA 1"
 ];
-
-// --- MOTOR UNIVERSAL DE LOGO-URI ---
-const getUniversalLogo = (name) => {
-    // Curățăm numele pentru a crea un slug compatibil cu CDN-ul
-    const slug = name.toLowerCase()
-        .replace(/sky sports/g, 'sky-sports')
-        .replace(/tnt sports/g, 'tnt-sports')
-        .replace(/[^a-z0-9]/g, '') 
-        .trim();
-    
-    // Sursă globală via jsDelivr pentru viteză și stabilitate
-    return `https://cdn.jsdelivr.net/gh/iptv-org/logos@master/logos/${slug}.png`;
-};
 
 // --- CURĂȚARE NUME ȘI DETECTARE CALITATE ---
 const cleanChannelName = (name) => {
@@ -96,7 +83,6 @@ async function createAddon(config) {
         idPrefixes: ["group_"]
     });
 
-    // --- CATALOG HANDLER ---
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
         const searchInput = args.extra?.search ? args.extra.search.toLowerCase() : "";
@@ -104,13 +90,11 @@ async function createAddon(config) {
 
         let results = [];
         if (searchInput) {
-            // Căutare elastică word-by-word
             const words = searchInput.split(/\s+/).filter(w => w.length > 0);
             results = addon.channels.filter(item => words.every(word => item.name.toLowerCase().includes(word)));
         } else if (genreInput) {
             results = addon.channels.filter(i => (i.attributes?.['group-title'] || "").toLowerCase().includes(genreInput));
         } else {
-            // Afișare Featured Channels
             results = addon.channels.filter(i => FEATURED_CHANNELS.some(f => i.name.toUpperCase().includes(f)));
         }
 
@@ -118,7 +102,8 @@ async function createAddon(config) {
         results.forEach(item => {
             const { baseName } = cleanChannelName(item.name);
             if (!unique.has(baseName)) {
-                const logo = getUniversalLogo(baseName);
+                // Folosește DOAR logoul furnizat de Xtream (tvg-logo)
+                const logo = item.attributes?.['tvg-logo'] || item.logo;
                 unique.set(baseName, {
                     id: `group_${Buffer.from(baseName).toString('hex')}`,
                     type: 'tv',
@@ -140,13 +125,12 @@ async function createAddon(config) {
         return { metas: finalMetas.slice(0, 100) };
     });
 
-    // --- META HANDLER ---
     builder.defineMetaHandler(async ({ id }) => {
         const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
         const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
         if (matches.length === 0) return { meta: null };
         
-        const logo = getUniversalLogo(targetName);
+        const logo = matches[0].attributes?.['tvg-logo'] || matches[0].logo;
         const streamId = matches[0].id.split('_').pop();
         const epg = await addon.getXtreamEpg(streamId);
         const now = new Date();
@@ -165,7 +149,6 @@ async function createAddon(config) {
         return { meta: { id, type: 'tv', name: targetName, description, poster: logo, background: logo, logo: logo } };
     });
 
-    // --- STREAM HANDLER ---
     builder.defineStreamHandler(async ({ id }) => {
         const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
         const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
