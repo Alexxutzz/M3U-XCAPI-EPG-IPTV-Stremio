@@ -2,9 +2,30 @@ require('dotenv').config();
 const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
-const ADDON_NAME = "PRO IPTV Search";
-const ADDON_ID = "org.stremio.m3u-epg-search";
+const ADDON_NAME = "IPTV Stremio";
+const ADDON_ID = "org.stremio.iptv.professional";
 const RO_TIME = { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Bucharest', hour12: false };
+
+// --- UTILS: CURĂȚARE ȘI FORMATARE PROFESIONALĂ ---
+const cleanChannelName = (name) => {
+    if (!name) return { baseName: "Unknown Channel", quality: "" };
+    
+    let quality = "";
+    const lowerName = name.toLowerCase();
+    
+    if (lowerName.includes("4k") || lowerName.includes("uhd")) quality = "4K Ultra HD";
+    else if (lowerName.includes("fhd") || lowerName.includes("1080")) quality = "Full HD";
+    else if (lowerName.includes("hd") || lowerName.includes("720")) quality = "HD Quality";
+
+    let clean = name
+        .replace(/RO[:| \-]*|ROMANIA[:| \-]*|UK[:| \-]*|UK\||US[:| \-]*|US\|/gi, '') 
+        .replace(/FHD|HD|SD|1080p|720p|4K|UHD|H\.265|HEVC|BACKUP|ALT/gi, '') 
+        .replace(/\[.*\]|\(.*\)/g, '') 
+        .replace(/\s+/g, ' ') 
+        .trim();
+
+    return { baseName: clean || "General Channel", quality: quality };
+};
 
 class M3UEPGAddon {
     constructor(config = {}) {
@@ -13,25 +34,28 @@ class M3UEPGAddon {
         this.lastUpdate = 0;
     }
 
+    // Progres bar cu aspect minimalist
     getProgressBar(start, end) {
         const now = new Date();
-        const progress = Math.max(0, Math.min(100, Math.round(((now - start) / (end - start)) * 100)));
+        const total = end - start;
+        const elapsed = now - start;
+        const progress = Math.max(0, Math.min(100, Math.round((elapsed / total) * 100)));
         const filled = Math.round(progress / 10);
-        return `${"█".repeat(filled)}${"░".repeat(10 - filled)} ${progress}%`;
+        return `${"🔵".repeat(filled)}${"⚪".repeat(10 - filled)} ${progress}%`;
     }
 
     async getXtreamEpg(streamId) {
         const url = `${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_short_epg&stream_id=${streamId}`;
         try {
-            const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 3000 });
+            const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 3500 });
             const data = await res.json();
             const decode = (str) => {
                 try { return Buffer.from(str, 'base64').toString('utf-8'); }
                 catch(e) { return str; }
             };
             return data?.epg_listings?.map(p => ({
-                title: p.title ? decode(p.title) : "Program",
-                desc: p.description ? decode(p.description) : "",
+                title: p.title ? decode(p.title) : "Program TV",
+                desc: p.description ? decode(p.description) : "Nicio descriere disponibilă.",
                 start: new Date(p.start),
                 end: new Date(p.end)
             })) || null;
@@ -39,13 +63,12 @@ class M3UEPGAddon {
     }
 
     async updateData() {
-        // Cache scurt de 10 min pentru căutări rapide
-        if (Date.now() - this.lastUpdate < 600000 && this.channels.length > 0) return;
+        if (Date.now() - this.lastUpdate < 900000 && this.channels.length > 0) return;
         try {
             const provider = require(`./src/js/providers/xtreamProvider.js`);
             await provider.fetchData(this);
             this.lastUpdate = Date.now();
-        } catch (e) { console.error("Search Fetch Error:", e.message); }
+        } catch (e) { console.error("Update Error:", e.message); }
     }
 }
 
@@ -53,103 +76,118 @@ async function createAddon(config) {
     const addon = new M3UEPGAddon(config);
     const builder = new addonBuilder({
         id: ADDON_ID,
-        version: "6.0.0",
+        version: "10.0.0",
         name: ADDON_NAME,
         resources: ["catalog", "stream", "meta"],
         types: ["tv"],
         catalogs: [
             { 
-                type: 'tv', 
-                id: 'iptv_dynamic', 
-                name: '🔍 Căutare Canale (Scrie nume)', 
-                extra: [{ name: 'search', isRequired: false }] 
+                type: 'tv', id: 'iptv_main', name: '📺 IPTV Stremio', 
+                extra: [
+                    { name: 'search', isRequired: false },
+                    { name: 'genre', options: ['Sport', 'Filme', 'Documentare', 'Generale', 'Stiri'], isRequired: false }
+                ] 
             }
         ],
-        idPrefixes: ["iptv_"]
+        idPrefixes: ["group_"]
     });
 
+    // --- CATALOG HANDLER (LOGICĂ DE GRUPARE RAPIDĂ) ---
     builder.defineCatalogHandler(async (args) => {
-        // Dacă utilizatorul nu a scris nimic, returnăm o listă goală sau un mesaj
-        if (!args.extra?.search) {
-            return { metas: [] }; 
+        await addon.updateData();
+        let list = addon.channels;
+
+        const q = args.extra?.search ? args.extra.search.toLowerCase() : "";
+        const g = args.extra?.genre ? args.extra.genre.toLowerCase() : "";
+
+        if (!q && !g) return { metas: [] };
+
+        let filtered = list.filter(i => {
+            const nameMatch = i.name.toLowerCase().includes(q);
+            const groupMatch = g ? (i.attributes?.['group-title'] || "").toLowerCase().includes(g) : true;
+            return nameMatch && groupMatch;
+        });
+
+        const uniqueChannels = new Map();
+        for (const item of filtered) {
+            const { baseName } = cleanChannelName(item.name);
+            if (!uniqueChannels.has(baseName)) {
+                uniqueChannels.set(baseName, {
+                    id: `group_${Buffer.from(baseName).toString('hex')}`,
+                    type: 'tv',
+                    name: baseName,
+                    poster: item.attributes?.['tvg-logo'] || item.logo || "",
+                    posterShape: 'square'
+                });
+            }
         }
 
-        await addon.updateData();
-        const q = args.extra.search.toLowerCase();
-        
-        // Filtrare agresivă și rapidă
-        const results = addon.channels.filter(i => i.name.toLowerCase().includes(q));
-
-        return { 
-            metas: results.map(i => ({
-                id: i.id,
-                type: 'tv',
-                name: i.name,
-                poster: i.attributes?.['tvg-logo'] || i.logo || "",
-                posterShape: 'square'
-            }))
-        };
+        return { metas: Array.from(uniqueChannels.values()).slice(0, 80) };
     });
 
+    // --- META HANDLER (EPG PROFESIONAL) ---
     builder.defineMetaHandler(async ({ id }) => {
-        const item = addon.channels.find(i => i.id === id);
-        if (!item) return { meta: null };
-
-        const streamId = id.split('_').pop();
-        const epg = await addon.getXtreamEpg(streamId);
+        if (!id.startsWith("group_")) return { meta: null };
+        const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
         
+        const firstMatch = addon.channels.find(c => cleanChannelName(c.name).baseName === targetName);
+        if (!firstMatch) return { meta: null };
+
+        const streamId = firstMatch.id.split('_').pop();
+        const epg = await addon.getXtreamEpg(streamId);
         const now = new Date();
         const oraRO = now.toLocaleTimeString('ro-RO', RO_TIME);
 
-        // HEADER: Ora și Canalul
-        let description = `🕒 ORA RO: ${oraRO}\n`;
-        description += `📺 CANAL: ${item.name.replace(/^RO\||RO:/gi, '').trim()}\n\n`; 
+        let desc = `🕒 Ora curentă: ${oraRO}\n`;
+        desc += `📡 Status: Semnal stabil\n`;
+        desc += `━━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
         if (epg && epg.length > 0) {
             const current = epg.find(p => now >= p.start && now <= p.end) || epg[0];
-            const s = current.start.toLocaleTimeString('ro-RO', RO_TIME);
-            const e = current.end.toLocaleTimeString('ro-RO', RO_TIME);
-            
-            // SECTIUNEA ACUM: Mai aerisită
-            description += `🔴 ACUM SE DIFUZEAZĂ:\n`;
-            description += `👉 ${current.title}\n`;
-            description += `⏰ ${s} — ${e}\n`;
-            description += `${addon.getProgressBar(current.start, current.end)}\n\n`;
+            desc += `🔴 ACUM: ${current.title.toUpperCase()}\n`;
+            desc += `⏰ [${current.start.toLocaleTimeString('ro-RO', RO_TIME)} — ${current.end.toLocaleTimeString('ro-RO', RO_TIME)}]\n`;
+            desc += `${addon.getProgressBar(current.start, current.end)}\n\n`;
             
             if (current.desc) {
-                description += `ℹ️ ${current.desc.substring(0, 150)}${current.desc.length > 150 ? '...' : ''}\n\n`;
+                desc += `ℹ️ INFO:\n${current.desc.substring(0, 180)}${current.desc.length > 180 ? '...' : ''}\n\n`;
             }
 
-            // SECTIUNEA URMEAZĂ: Listă verticală clară
-            const next = epg.filter(p => p.start > now).slice(0, 4);
+            const next = epg.filter(p => p.start > now).slice(0, 3);
             if (next.length > 0) {
-                description += `📅 ÎN CONTINUARE:\n`;
+                desc += `📅 PROGRAM URMĂTOR:\n`;
                 next.forEach(p => {
-                    const pStart = p.start.toLocaleTimeString('ro-RO', RO_TIME);
-                    description += `• ${pStart}  ${p.title}\n`;
+                    desc += `• ${p.start.toLocaleTimeString('ro-RO', RO_TIME)}  ${p.title}\n`;
                 });
             }
         } else {
-            description += `📡 Informațiile EPG nu sunt disponibile momentan.`;
+            desc += `📡 Ghidul TV nu este disponibil pentru acest canal.`;
         }
 
-        const logo = item.attributes?.['tvg-logo'] || item.logo || "";
-        return { 
-            meta: { 
-                id, 
-                type: 'tv', 
-                name: item.name, 
-                description, 
-                poster: logo, 
-                background: logo, 
-                logo: logo 
-            } 
+        return {
+            meta: {
+                id, type: 'tv', name: targetName,
+                description: desc,
+                poster: firstMatch.attributes?.['tvg-logo'] || firstMatch.logo || "",
+                background: firstMatch.attributes?.['tvg-logo'] || firstMatch.logo || ""
+            }
         };
     });
 
+    // --- STREAM HANDLER ---
     builder.defineStreamHandler(async ({ id }) => {
-        const item = addon.channels.find(i => i.id === id);
-        return { streams: item ? [{ url: item.url, title: item.name }] : [] };
+        if (!id.startsWith("group_")) return { streams: [] };
+        const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
+        const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
+
+        return {
+            streams: matches.map(m => {
+                const { quality } = cleanChannelName(m.name);
+                return {
+                    url: m.url,
+                    title: `🌐 Sursă Server ${quality ? `— ${quality}` : '— Standard'}`
+                };
+            })
+        };
     });
 
     return builder.getInterface();
