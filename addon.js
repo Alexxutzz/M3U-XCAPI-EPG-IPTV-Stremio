@@ -133,49 +133,47 @@ async function createAddon(config) {
     const epg = await addon.getXtreamEpg(streamId);
     const now = new Date();
 
-    // --- CONSTRUCȚIE HEADER ---
-    let description = `📅 ${now.toLocaleDateString('ro-RO')}  |  🕒 ${now.toLocaleTimeString('ro-RO', RO_TIME)}\n`;
+    // 1. HEADER - Informații de sistem
+    let description = `📅 DATA: ${now.toLocaleDateString('ro-RO')}  |  🕒 ORA: ${now.toLocaleTimeString('ro-RO', RO_TIME)}\n`;
     description += `📺 CANAL: ${targetName.toUpperCase()}\n`;
-    description += `──────────────────────────────\n\n`;
+    description += `─────────────────────────────────\n\n`;
 
     if (epg && epg.length > 0) {
         const currentIndex = epg.findIndex(p => now >= p.start && now <= p.end);
         const cur = currentIndex !== -1 ? epg[currentIndex] : epg[0];
         const next = epg[currentIndex + 1];
 
-        // --- PROGRAM CURENT ---
+        // 2. SECȚIUNEA "ÎN DIRECT"
         const total = cur.end - cur.start;
         const elapsed = now - cur.start;
         const percent = Math.max(0, Math.min(100, Math.round((elapsed / total) * 100)));
-        
-        // Bară de progres minimalistă și elegantă
-        const bar = "■".repeat(Math.round(percent / 10)) + "□".repeat(10 - Math.round(percent / 10));
+        const bar = "▓".repeat(Math.round(percent / 10)) + "░".repeat(10 - Math.round(percent / 10));
 
-        description += `🔴 **ACUM ÎN DIFUZARE**\n`;
-        description += `**${cur.title.toUpperCase()}**\n`;
-        description += `⏱️ ${cur.start.toLocaleTimeString('ro-RO', RO_TIME)} — ${cur.end.toLocaleTimeString('ro-RO', RO_TIME)}\n`;
+        description += `🔴 ACUM ÎN DIFUZARE:\n`;
+        description += `${cur.title.toUpperCase()}\n`;
+        description += `[ ${cur.start.toLocaleTimeString('ro-RO', RO_TIME)} — ${cur.end.toLocaleTimeString('ro-RO', RO_TIME)} ]\n`;
         description += `PROGRES: ${bar} ${percent}%\n\n`;
 
         if (cur.desc) {
-            description += `📖 *${cur.desc.substring(0, 180).trim()}...*\n\n`;
+            description += `ℹ️ INFO: ${cur.desc.substring(0, 150).trim()}...\n\n`;
         }
 
-        // --- PROGRAMUL URMĂTOR (Adăugat pentru organizare) ---
+        // 3. SECȚIUNEA "URMEAZĂ"
         if (next) {
-            description += `──────────────────────────────\n`;
-            description += `⏭️ **URMEAZĂ DISPONIBIL**\n`;
-            description += `**${next.title}**\n`;
-            description += `🕒 Începe la: ${next.start.toLocaleTimeString('ro-RO', RO_TIME)}\n`;
+            description += `─────────────────────────────────\n`;
+            description += `⏭️ URMEAZĂ DISPONIBIL:\n`;
+            description += `${next.title.toUpperCase()}\n`;
+            description += `🕒 START la ora: ${next.start.toLocaleTimeString('ro-RO', RO_TIME)}\n\n`;
         }
 
     } else {
-        description += `📡 Ghidul TV (EPG) nu este disponibil momentan.\n`;
-        description += `Verificați conexiunea sau sursa IPTV.`;
+        description += `📡 Ghidul TV nu este disponibil momentan.\n\n`;
     }
 
-    // Adăugăm un footer discret
-    description += `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    description += `⭐ Calitate disponibilă: ${matches.map(m => cleanChannelName(m.name).quality || 'SD').join(' / ')}`;
+    // 4. FOOTER - Detalii Tehnice
+    description += `─────────────────────────────────\n`;
+    description += `⭐ CALITĂȚI: ${matches.map(m => cleanChannelName(m.name).quality || 'SD').join(' / ')}\n`;
+    description += `🌐 STATUS: ONLINE`;
 
     return { 
         meta: { 
