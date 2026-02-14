@@ -24,26 +24,35 @@ class M3UEPGAddon {
         this.lastUpdate = 0;
     }
 
-    // --- XTREAM EPG FETCH ---
-    async getXtreamEpg(streamId) {
+   async getXtreamEpg(streamId) {
         if (this.providerName !== 'xtream') return null;
+        
         const url = `${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_short_epg&stream_id=${streamId}`;
         
         try {
-            const response = await fetch(url);
+            const response = await fetch(url, {
+                headers: { 'User-Agent': 'IPTVSmarters/1.0.3' },
+                timeout: 5000 
+            });
+
             const data = await response.json();
-            if (data && data.epg_listings && data.epg_listings.length > 0) {
-                return data.epg_listings.map(prog => ({
-                    title: prog.title ? Buffer.from(prog.title, 'base64').toString('utf-8') : "Program",
-                    description: prog.description ? Buffer.from(prog.description, 'base64').toString('utf-8') : "",
-                    startTime: prog.start ? new Date(prog.start) : null,
-                    stopTime: prog.end ? new Date(prog.end) : null
-                }));
+            
+            // Dacă lista e goală, logăm asta ca să știm sigur
+            if (!data || !data.epg_listings || data.epg_listings.length === 0) {
+                console.log(`[EPG] Serverul a răspuns corect, dar nu există program pentru canalul ${streamId}`);
+                return null;
             }
+
+            return data.epg_listings.map(prog => ({
+                title: prog.title ? Buffer.from(prog.title, 'base64').toString('utf-8') : "Program",
+                description: prog.description ? Buffer.from(prog.description, 'base64').toString('utf-8') : "",
+                startTime: prog.start ? new Date(prog.start) : null,
+                stopTime: prog.end ? new Date(prog.end) : null
+            }));
         } catch (e) {
             console.error('[EPG ERROR]', e.message);
+            return null;
         }
-        return null;
     }
 
     async updateData(force = false) {
