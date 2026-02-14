@@ -1,10 +1,10 @@
-// IPTV Stremio Addon - Vercel Optimized Version
+// IPTV Stremio Addon - Complete Vercel Optimized Version
 require('dotenv').config();
 const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
-const ADDON_NAME = "M3U/EPG TV Addon";
-const ADDON_ID = "org.stremio.m3u-epg-addon";
+const ADDON_NAME = "PRO IPTV & EPG Plus";
+const ADDON_ID = "org.stremio.m3u-epg-pro";
 
 class M3UEPGAddon {
     constructor(config = {}) {
@@ -13,37 +13,57 @@ class M3UEPGAddon {
         this.lastUpdate = 0;
     }
 
-    // Helper Design EPG
+    // Progres vizual îmbunătățit cu emoji
     getProgressBar(start, end) {
         const now = new Date();
-        const progress = Math.max(0, Math.min(100, Math.round(((now - start) / (end - start)) * 100)));
-        const filled = Math.round(progress / 10);
-        return `${"█".repeat(filled)}${"░".repeat(10 - filled)} ${progress}%`;
+        const total = end - start;
+        const elapsed = now - start;
+        const progress = Math.max(0, Math.min(100, Math.round((elapsed / total) * 100)));
+        const size = 10;
+        const filled = Math.round((progress / 100) * size);
+        return `${"🟢".repeat(filled)}${"⚪".repeat(size - filled)} ${progress}%`;
     }
 
     async getXtreamEpg(streamId) {
         const url = `${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_short_epg&stream_id=${streamId}`;
         try {
-            const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 3000 });
-            const text = await res.text();
-            if (text.includes('<html')) return null; // Ignorăm erorile HTML de la server
-            const data = JSON.parse(text);
-            return data?.epg_listings?.map(p => ({
-                title: p.title ? Buffer.from(p.title, 'base64').toString('utf-8') : "Program",
-                desc: p.description ? Buffer.from(p.description, 'base64').toString('utf-8') : "",
+            const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 4000 });
+            const data = await res.json();
+            if (!data || !data.epg_listings) return null;
+
+            const decode = (str) => {
+                try { return Buffer.from(str, 'base64').toString('utf-8'); }
+                catch(e) { return str; }
+            };
+
+            return data.epg_listings.map(p => ({
+                title: decode(p.title),
+                desc: decode(p.description),
                 start: new Date(p.start),
-                end: new Date(p.end)
-            })) || null;
+                end: new Date(p.end),
+                duration: Math.round((new Date(p.end) - new Date(p.start)) / 60000)
+            }));
         } catch (e) { return null; }
     }
 
     async updateData() {
-        if (Date.now() - this.lastUpdate < 1200000) return; // Cache intern 20 min
+        if (Date.now() - this.lastUpdate < 1800000) return; // Cache 30 min
         try {
-            const provider = require(`./src/js/providers/xtreamProvider.js`);
-            await provider.fetchData(this);
+            // Aici ar trebui să fie logica ta de fetch din xtreamProvider.js
+            // Exemplu simplu de integrare dacă metoda e internă:
+            const response = await fetch(`${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_live_streams`);
+            const streams = await response.json();
+            
+            this.channels = streams.map(s => ({
+                id: `iptv_${s.stream_id}`,
+                name: s.name,
+                logo: s.stream_icon || "",
+                url: `${this.config.xtreamUrl}/live/${this.config.xtreamUsername}/${this.config.xtreamPassword}/${s.stream_id}.m3u8`,
+                group: s.category_id
+            }));
+            
             this.lastUpdate = Date.now();
-        } catch (e) { console.error("Fetch Error:", e.message); }
+        } catch (e) { console.error("Update Error:", e.message); }
     }
 }
 
@@ -51,67 +71,115 @@ async function createAddon(config) {
     const addon = new M3UEPGAddon(config);
     const builder = new addonBuilder({
         id: ADDON_ID,
-        version: "2.1.6",
+        version: "3.1.0",
         name: ADDON_NAME,
         resources: ["catalog", "stream", "meta"],
-        types: ["tv", "movie"],
+        types: ["tv"],
         catalogs: [
-            { type: 'tv', id: 'iptv_channels', name: 'IPTV Channels', extra: [{ name: 'search' }] }
+            { 
+                type: 'tv', 
+                id: 'iptv_channels', 
+                name: '📺 Toate Canalele', 
+                extra: [{ name: 'search' }] 
+            }
         ],
         idPrefixes: ["iptv_"]
     });
 
-    // Handler Cataloage (Limitat la 300 canale pentru viteza pe Vercel)
+    // CATALOG HANDLER
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
         let results = addon.channels;
+
         if (args.extra?.search) {
             const q = args.extra.search.toLowerCase();
             results = results.filter(i => i.name.toLowerCase().includes(q));
         }
+
         return { 
-            metas: results.slice(0, 300).map(i => ({
+            metas: results.slice(0, 500).map(i => ({
                 id: i.id,
                 type: 'tv',
                 name: i.name,
-                poster: i.attributes?.['tvg-logo'] || i.logo || ""
+                poster: i.logo || "https://via.placeholder.com/300x450?text=Fara+Logo",
+                posterShape: 'square'
             }))
         };
     });
 
-    // Handler Meta cu EPG Complex
+    // META HANDLER (EPG COMPLEX + ORA)
     builder.defineMetaHandler(async ({ id }) => {
         const item = addon.channels.find(i => i.id === id);
         if (!item) return { meta: null };
 
         const streamId = id.split('_').pop();
-        const epg = await addon.getXtreamEpg(streamId);
+        const epgData = await addon.getXtreamEpg(streamId);
         
-        let description = `📺 Canal: ${item.name}\n📂 Grup: ${item.attributes?.['group-title'] || 'Generic'}\n`;
-        description += `──────────────────────────\n`;
+        const now = new Date();
+        const oraLocala = now.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' });
 
-        if (epg && epg[0]) {
-            const cur = epg[0];
-            const s = cur.start.toLocaleTimeString('ro-RO', {hour:'2-digit', minute:'2-digit'});
-            const e = cur.end.toLocaleTimeString('ro-RO', {hour:'2-digit', minute:'2-digit'});
-            description += `🔴 ACUM: ${cur.title}\n⏰ ${s} - ${e}\n📊 ${addon.getProgressBar(cur.start, cur.end)}\n\n📝 ${cur.desc}\n`;
-            
-            if (epg.length > 1) {
-                description += `──────────────────────────\n📅 URMEAZĂ:\n`;
-                epg.slice(1, 4).forEach(p => {
-                    description += `• ${p.start.toLocaleTimeString('ro-RO', {hour:'2-digit', minute:'2-digit'})} - ${p.title}\n`;
-                });
+        let metaDescription = `🕒 ORA ACTUALĂ: ${oraLocala}\n`;
+        metaDescription += `📺 CANAL: ${item.name.toUpperCase()}\n`;
+        metaDescription += `───────────────────────────\n`;
+
+        if (epgData && epgData.length > 0) {
+            const currentIdx = epgData.findIndex(p => now >= p.start && now <= p.end);
+            const current = currentIdx !== -1 ? epgData[currentIdx] : null;
+
+            if (current) {
+                const s = current.start.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' });
+                const e = current.end.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' });
+                
+                metaDescription += `🔴 ACUM:\n🏷️ ${current.title}\n`;
+                metaDescription += `⏰ [${s} - ${e}] (${current.duration} min)\n`;
+                metaDescription += `${addon.getProgressBar(current.start, current.end)}\n\n`;
+                metaDescription += `📝 ${current.desc || 'Fără descriere.'}\n`;
+                
+                const nextPrograms = epgData.slice(currentIdx + 1, currentIdx + 6);
+                if (nextPrograms.length > 0) {
+                    metaDescription += `\n📅 PROGRAM URMĂTOR:\n`;
+                    nextPrograms.forEach(p => {
+                        const start = p.start.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' });
+                        const end = p.end.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' });
+                        metaDescription += `🔹 ${start} - ${end} | ${p.title}\n`;
+                    });
+                }
+            } else {
+                const nextUp = epgData.find(p => p.start > now);
+                if (nextUp) {
+                    const s = nextUp.start.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' });
+                    metaDescription += `⏭️ URMĂTORUL PROGRAM:\n🏷️ ${nextUp.title} la ora ${s}\n`;
+                }
             }
         } else {
-            description += `📡 EPG momentan indisponibil pe acest server.`;
+            metaDescription += `⚠️ EPG momentan indisponibil.`;
         }
 
-        return { meta: { id, type: 'tv', name: item.name, description, poster: item.logo || "" } };
+        return { 
+            meta: { 
+                id, 
+                type: 'tv', 
+                name: item.name, 
+                description: metaDescription, 
+                poster: item.logo || "",
+                background: item.logo || "",
+                logo: item.logo || ""
+            } 
+        };
     });
 
+    // STREAM HANDLER
     builder.defineStreamHandler(async ({ id }) => {
         const item = addon.channels.find(i => i.id === id);
-        return { streams: item ? [{ url: item.url, title: item.name }] : [] };
+        if (!item) return { streams: [] };
+        
+        return { 
+            streams: [{ 
+                url: item.url, 
+                title: `Stream Direct: ${item.name}`,
+                behaviorHints: { notWebReady: true }
+            }] 
+        };
     });
 
     return builder.getInterface();
