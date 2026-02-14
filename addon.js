@@ -3,16 +3,18 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
 const ADDON_NAME = "IPTV Stremio";
-const ADDON_ID = "org.stremio.iptv.pro.v231";
-const VERSION = "2.3.1";
+const ADDON_ID = "org.stremio.iptv.pro.v240";
+const VERSION = "2.4.0";
 const RO_TIME = { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Bucharest', hour12: false };
 
-// Cache pentru Canale Recente (la nivel de server)
-let recentChannels = []; 
+// --- CONFIGURARE CANALE RECOMANDATE (ROMÂNIA + ANGLIA SPORT) ---
+const FEATURED_CHANNELS = [
+    "PRO TV", "DIGI SPORT 1", "DIGI SPORT 2", "DIGI SPORT 3", "DIGI SPORT 4",
+    "ANTENA 1", "HBO", "SKY SPORTS MAIN EVENT", "SKY SPORTS PREMIER LEAGUE", 
+    "SKY SPORTS FOOTBALL", "SKY SPORTS F1", "TNT SPORTS 1", "TNT SPORTS 2", 
+    "EUROSPORT", "KANAL D", "PRIMA TV"
+];
 
-const FEATURED_CHANNELS = ["PRO TV", "DIGI SPORT 1", "DIGI SPORT 2", "DIGI SPORT 3", "DIGI SPORT 4", "ANTENA 1", "HBO", "CINEMAX", "EUROSPORT", "KANAL D"];
-
-// --- SMART CLEAN: REZOLVĂ PROBLEMA "USA NETWORK" ---
 const cleanChannelName = (name) => {
     if (!name) return { baseName: "Canal TV", quality: "" };
     let quality = "";
@@ -22,7 +24,7 @@ const cleanChannelName = (name) => {
     else if (lower.includes("fhd") || lower.includes("1080")) quality = "Full HD";
     else if (lower.includes("hd") || lower.includes("720")) quality = "HD Quality";
 
-    // Modificăm regex-ul să fie mai selectiv: ștergem prefixul de țară DOAR dacă este urmat de separator
+    // Curățare inteligentă: eliminăm prefixele de țară doar dacă sunt urmate de separator clar
     let clean = name
         .replace(/^(RO|UK|US|IT|FR|ES|DE)[:| \-|\|]+/gi, '') 
         .replace(/FHD|HD|SD|1080p|720p|4K|UHD|H\.265|HEVC|BACKUP|ALT/gi, '')
@@ -88,9 +90,6 @@ async function createAddon(config) {
         types: ["tv"],
         catalogs: [
             { 
-                type: 'tv', id: 'iptv_recent', name: '🕒 Recent Accesate'
-            },
-            { 
                 type: 'tv', id: 'iptv_dynamic', name: '📺 IPTV Stremio', 
                 extra: [
                     { name: 'search', isRequired: false },
@@ -101,14 +100,8 @@ async function createAddon(config) {
         idPrefixes: ["group_"]
     });
 
-    // --- CATALOG HANDLER ---
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
-        
-        if (args.id === 'iptv_recent') {
-            return { metas: recentChannels };
-        }
-
         const q = args.extra?.search ? args.extra.search.toLowerCase() : "";
         const g = args.extra?.genre ? args.extra.genre.toLowerCase() : "";
 
@@ -118,6 +111,7 @@ async function createAddon(config) {
         } else if (g) {
             results = addon.channels.filter(i => (i.attributes?.['group-title'] || "").toLowerCase().includes(g));
         } else {
+            // Featured channels filter
             results = addon.channels.filter(i => FEATURED_CHANNELS.some(f => i.name.toUpperCase().includes(f)));
         }
 
@@ -136,10 +130,18 @@ async function createAddon(config) {
             }
         });
 
-        return { metas: Array.from(unique.values()).slice(0, 100) };
+        let finalMetas = Array.from(unique.values());
+        if (!q && !g) {
+            finalMetas.sort((a, b) => {
+                const indexA = FEATURED_CHANNELS.findIndex(f => a.name.toUpperCase().includes(f));
+                const indexB = FEATURED_CHANNELS.findIndex(f => b.name.toUpperCase().includes(f));
+                return indexA - indexB;
+            });
+        }
+
+        return { metas: finalMetas.slice(0, 100) };
     });
 
-    // --- META HANDLER (EPG) ---
     builder.defineMetaHandler(async ({ id }) => {
         if (!id.startsWith("group_")) return { meta: null };
         const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
@@ -148,14 +150,12 @@ async function createAddon(config) {
         if (matches.length === 0) return { meta: null };
         const first = matches[0];
         const logo = getSmartLogo(targetName, first.attributes?.['tvg-logo'] || first.logo);
-        
         const streamId = first.id.split('_').pop();
         const epg = await addon.getXtreamEpg(streamId);
         const now = new Date();
         const oraRO = now.toLocaleTimeString('ro-RO', RO_TIME);
 
-        let description = `🕒 ORA ROMÂNIEI: ${oraRO}\n📺 CANAL: ${targetName}\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-
+        let description = `🕒 ORA RO: ${oraRO}\n📺 CANAL: ${targetName}\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
         if (epg && epg.length > 0) {
             const cur = epg.find(p => now >= p.start && now <= p.end) || epg[0];
             description += `🔴 ACUM: ${cur.title.toUpperCase()}\n⏰ ${cur.start.toLocaleTimeString('ro-RO', RO_TIME)} — ${cur.end.toLocaleTimeString('ro-RO', RO_TIME)}\n${addon.getProgressBar(cur.start, cur.end)}\n\n`;
@@ -177,23 +177,11 @@ async function createAddon(config) {
         };
     });
 
-    // --- STREAM HANDLER ---
     builder.defineStreamHandler(async ({ id }) => {
         if (!id.startsWith("group_")) return { streams: [] };
         const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
-        
-        // Logica Recente: Salvăm când se accesează fluxul
-        const firstMatch = addon.channels.find(c => cleanChannelName(c.name).baseName === targetName);
-        if (firstMatch) {
-            const meta = {
-                id, type: 'tv', name: targetName,
-                poster: getSmartLogo(targetName, firstMatch.attributes?.['tvg-logo'] || firstMatch.logo),
-                posterShape: 'square'
-            };
-            recentChannels = [meta, ...recentChannels.filter(c => c.name !== targetName)].slice(0, 15);
-        }
-
         const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
+
         return {
             streams: matches.map(m => ({
                 url: m.url,
