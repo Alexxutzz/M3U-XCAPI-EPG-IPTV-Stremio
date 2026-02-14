@@ -422,14 +422,17 @@ class M3UEPGAddon {
     }
 
     generateMetaPreview(item) {
-        const meta = { id: item.id, type: item.type, name: item.name };
-        if (item.type === 'tv') {
-            const epgId = item.attributes?.['tvg-id'] || item.attributes?.['tvg-name'];
-            const current = this.getCurrentProgram(epgId);
-            meta.description = current
-                ? `📡 Now: ${current.title}${current.description ? `\n${current.description}` : ''}`
-                : '📡 Live Channel';
-            meta.poster = this.deriveFallbackLogoUrl(item);
+    const meta = { id: item.id, type: item.type, name: item.name };
+    if (item.type === 'tv') {
+        // Căutăm ID-ul EPG în atributele tvg-id sau tvg-name din M3U
+        const epgId = item.attributes?.['tvg-id'] || item.attributes?.['tvg-name'];
+        const current = this.getCurrentProgram(epgId);
+        
+        meta.description = current
+            ? `📡 ACUM: ${current.title}${current.description ? `\n${current.description}` : ''}`
+            : '📡 Program indisponibil';
+        
+        meta.poster = this.deriveFallbackLogoUrl(item);
             meta.genres = item.category
                 ? [item.category]
                 : (item.attributes?.['group-title'] ? [item.attributes['group-title']] : ['Live TV']);
