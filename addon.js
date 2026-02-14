@@ -97,32 +97,53 @@ async function createAddon(config) {
 
         const streamId = id.split('_').pop();
         const epg = await addon.getXtreamEpg(streamId);
+        
         const now = new Date();
         const oraRO = now.toLocaleTimeString('ro-RO', RO_TIME);
 
-        let description = `🕒 ORA RO: ${oraRO}\n📺 Canal: ${item.name}\n──────────────────────────\n`;
+        // HEADER: Ora și Canalul
+        let description = `🕒 ORA RO: ${oraRO}\n`;
+        description += `📺 CANAL: ${item.name.replace(/^RO\||RO:/gi, '').trim()}\n\n`; 
 
         if (epg && epg.length > 0) {
             const current = epg.find(p => now >= p.start && now <= p.end) || epg[0];
             const s = current.start.toLocaleTimeString('ro-RO', RO_TIME);
             const e = current.end.toLocaleTimeString('ro-RO', RO_TIME);
             
-            description += `🔴 ACUM: ${current.title}\n⏰ ${s} - ${e}\n📊 ${addon.getProgressBar(current.start, current.end)}\n\n📝 ${current.desc}\n`;
+            // SECTIUNEA ACUM: Mai aerisită
+            description += `🔴 ACUM SE DIFUZEAZĂ:\n`;
+            description += `👉 ${current.title}\n`;
+            description += `⏰ ${s} — ${e}\n`;
+            description += `${addon.getProgressBar(current.start, current.end)}\n\n`;
             
+            if (current.desc) {
+                description += `ℹ️ ${current.desc.substring(0, 150)}${current.desc.length > 150 ? '...' : ''}\n\n`;
+            }
+
+            // SECTIUNEA URMEAZĂ: Listă verticală clară
             const next = epg.filter(p => p.start > now).slice(0, 4);
             if (next.length > 0) {
-                description += `──────────────────────────\n📅 URMEAZĂ:\n`;
+                description += `📅 ÎN CONTINUARE:\n`;
                 next.forEach(p => {
-                    description += `• ${p.start.toLocaleTimeString('ro-RO', RO_TIME)} - ${p.title}\n`;
+                    const pStart = p.start.toLocaleTimeString('ro-RO', RO_TIME);
+                    description += `• ${pStart}  ${p.title}\n`;
                 });
             }
         } else {
-            description += `📡 EPG indisponibil.`;
+            description += `📡 Informațiile EPG nu sunt disponibile momentan.`;
         }
 
         const logo = item.attributes?.['tvg-logo'] || item.logo || "";
         return { 
-            meta: { id, type: 'tv', name: item.name, description, poster: logo, background: logo, logo: logo } 
+            meta: { 
+                id, 
+                type: 'tv', 
+                name: item.name, 
+                description, 
+                poster: logo, 
+                background: logo, 
+                logo: logo 
+            } 
         };
     });
 
