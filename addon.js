@@ -1,5 +1,4 @@
-// IPTV Stremio Addon Core (with debug logging + series (shows) support for BOTH Xtream & Direct M3U)
-// Version 1.4.0: Adds Direct M3U series grouping + per‑episode streams
+// IPTV Stremio Addon Core - Fixed EPG for Xtream Codes
 require('dotenv').config();
 
 const { addonBuilder } = require("stremio-addon-sdk");
@@ -19,7 +18,7 @@ if (process.env.REDIS_URL) {
         redisClient.connect().catch(err => console.error('[REDIS] Connect failed:', err.message));
         console.log('[REDIS] Enabled');
     } catch (e) {
-        console.warn('[REDIS] ioredis not installed or failed, falling back to in-memory LRU');
+        console.warn('[REDIS] ioredis failed, falling back to LRU');
         redisClient = null;
     }
 }
@@ -49,8 +48,7 @@ async function redisGetJSON(key) {
     if (!redisClient) return null;
     try {
         const raw = await redisClient.get(key);
-        if (!raw) return null;
-        return JSON.parse(raw);
+        return raw ? JSON.parse(raw) : null;
     } catch { return null; }
 }
 async function redisSetJSON(key, value, ttl) {
@@ -60,64 +58,32 @@ async function redisSetJSON(key, value, ttl) {
     } catch { /* ignore */ }
 }
 
-function stableStringify(obj) {
-    return JSON.stringify(obj, Object.keys(obj).sort());
-}
-
 function createCacheKey(config) {
     const minimal = {
         provider: config.provider,
-        m3uUrl: config.m3uUrl,
-        epgUrl: config.epgUrl,
-        enableEpg: !!config.enableEpg,
         xtreamUrl: config.xtreamUrl,
         xtreamUsername: config.xtreamUsername,
-        xtreamUseM3U: !!config.xtreamUseM3U,
-        xtreamOutput: config.xtreamOutput,
-        epgOffsetHours: config.epgOffsetHours,
-        includeSeries: config.includeSeries !== false // default true
+        epgOffsetHours: config.epgOffsetHours
     };
-    return crypto.createHash('md5').update(stableStringify(minimal)).digest('hex');
+    return crypto.createHash('md5').update(JSON.stringify(minimal)).digest('hex');
 }
 
 class M3UEPGAddon {
     constructor(config = {}, manifestRef) {
-        if (!config.provider) {
-            config.provider = config.useXtream ? 'xtream' : 'direct';
-        }
         this.providerName = config.provider === 'xtream' ? 'xtream' : 'direct';
         this.config = config;
         this.manifestRef = manifestRef;
         this.cacheKey = createCacheKey(config);
         this.updateInterval = 3600000;
-        this.channels = []; // live TV
-        this.movies = [];   // VOD movies
-        this.series = [];   // Series (shows)
-        this.seriesInfoCache = new Map(); // seriesId -> { videos: [...], fetchedAt }
+        this.channels = [];
+        this.movies = [];
+        this.series = [];
+        this.seriesInfoCache = new Map();
         this.epgData = {};
         this.lastUpdate = 0;
         this.log = makeLogger(config.debug);
 
-        // Direct provider may populate this (seriesId -> episodes array)
-        this.directSeriesEpisodeIndex = new Map();
-
-        if (typeof this.config.epgOffsetHours === 'string') {
-            const n = parseFloat(this.config.epgOffsetHours);
-            if (!isNaN(n)) this.config.epgOffsetHours = n;
-        }
-        if (typeof this.config.epgOffsetHours !== 'number' || !isFinite(this.config.epgOffsetHours))
-            this.config.epgOffsetHours = 0;
-        if (Math.abs(this.config.epgOffsetHours) > 48)
-            this.config.epgOffsetHours = 0;
-        if (typeof this.config.includeSeries === 'undefined')
-            this.config.includeSeries = true;
-
-        this.log.debug('Addon instance created', {
-            provider: this.providerName,
-            cacheKey: this.cacheKey,
-            epgOffsetHours: this.config.epgOffsetHours,
-            includeSeries: this.config.includeSeries
-        });
+        this.config.epgOffsetHours = parseFloat(this.config.epgOffsetHours) || 0;
     }
 
     async loadFromCache() {
@@ -134,613 +100,152 @@ class M3UEPGAddon {
             this.series = cached.series || [];
             this.epgData = cached.epgData || {};
             this.lastUpdate = cached.lastUpdate || 0;
-            // Direct series episodes index is not persisted; rebuild on next fetch
-            this.log.debug('Cache hit for data', {
-                channels: this.channels.length,
-                movies: this.movies.length,
-                series: this.series.length,
-                lastUpdate: new Date(this.lastUpdate).toISOString()
-            });
         }
     }
 
     async saveToCache() {
         if (!CACHE_ENABLED) return;
         const cacheKey = 'addon:data:' + this.cacheKey;
-        const entry = {
-            channels: this.channels,
-            movies: this.movies,
-            series: this.series,
-            epgData: this.epgData,
-            lastUpdate: this.lastUpdate
-        };
+        const entry = { channels: this.channels, movies: this.movies, series: this.series, epgData: this.epgData, lastUpdate: this.lastUpdate };
         dataCache.set(cacheKey, entry);
         await redisSetJSON(cacheKey, entry, CACHE_TTL_MS);
-        this.log.debug('Saved data to cache');
     }
 
-    buildGenresInManifest() {
-        if (!this.manifestRef) return;
-        const tvCatalog = this.manifestRef.catalogs.find(c => c.id === 'iptv_channels');
-        const movieCatalog = this.manifestRef.catalogs.find(c => c.id === 'iptv_movies');
-        const seriesCatalog = this.manifestRef.catalogs.find(c => c.id === 'iptv_series');
-
-        if (tvCatalog) {
-            const groups = [
-                ...new Set(
-                    this.channels
-                        .map(c => c.category || c.attributes?.['group-title'])
-                        .filter(Boolean)
-                        .map(s => s.trim())
-                )
-            ].sort((a, b) => a.localeCompare(b));
-            if (!groups.includes('All Channels')) groups.unshift('All Channels');
-            tvCatalog.genres = groups;
-        }
-
-        if (movieCatalog) {
-            const movieGroups = [
-                ...new Set(
-                    this.movies
-                        .map(c => c.category || c.attributes?.['group-title'])
-                        .filter(Boolean)
-                        .map(s => s.trim())
-                )
-            ].sort((a, b) => a.localeCompare(b));
-            movieCatalog.genres = movieGroups;
-        }
-
-        if (seriesCatalog) {
-            const seriesGroups = [
-                ...new Set(
-                    this.series
-                        .map(c => c.category || c.attributes?.['group-title'])
-                        .filter(Boolean)
-                        .map(s => s.trim())
-                )
-            ].sort((a, b) => a.localeCompare(b));
-            seriesCatalog.genres = seriesGroups;
-        }
-
-        this.log.debug('Catalog genres built', {
-            tvGenres: tvCatalog?.genres?.length || 0,
-            movieGenres: movieCatalog?.genres?.length || 0,
-            seriesGenres: seriesCatalog?.genres?.length || 0
-        });
-    }
-
-    parseM3U(content) {
-        const startTs = Date.now();
-        const lines = content.split('\n');
-        const items = [];
-        let currentItem = null;
-        for (const raw of lines) {
-            const line = raw.trim();
-            if (line.startsWith('#EXTINF:')) {
-                const matches = line.match(/#EXTINF:(-?\d+)(?:\s+(.*))?,(.*)/);
-                if (matches) {
-                    currentItem = {
-                        duration: parseInt(matches[1]),
-                        attributes: this.parseAttributes(matches[2] || ''),
-                        name: (matches[3] || '').trim()
-                    };
-                }
-            } else if (line && !line.startsWith('#') && currentItem) {
-                currentItem.url = line;
-                currentItem.logo = currentItem.attributes['tvg-logo'];
-                currentItem.epg_channel_id = currentItem.attributes['tvg-id'] || currentItem.attributes['tvg-name'];
-                currentItem.category = currentItem.attributes['group-title'];
-
-                const group = (currentItem.attributes['group-title'] || '').toLowerCase();
-                const lower = currentItem.name.toLowerCase();
-
-                const isMovie =
-                    group.includes('movie') ||
-                    lower.includes('movie') ||
-                    this.isMovieFormat(currentItem.name);
-
-                const isSeries =
-                    !isMovie && (
-                        group.includes('series') ||
-                        group.includes('show') ||
-                        /\bS\d{1,2}E\d{1,2}\b/i.test(currentItem.name) ||
-                        /\bSeason\s?\d+/i.test(currentItem.name)
-                    );
-
-                currentItem.type = isSeries ? 'series' : (isMovie ? 'movie' : 'tv');
-                currentItem.id = `iptv_${crypto.createHash('md5').update(currentItem.name + currentItem.url).digest('hex').substring(0, 16)}`;
-                items.push(currentItem);
-                currentItem = null;
-            }
-        }
-        const ms = Date.now() - startTs;
-        this.log.debug('M3U parsed', { lines: lines.length, items: items.length, ms });
-        return items;
-    }
-
-    parseAttributes(str) {
-        const attrs = {};
-        const regex = /(\w+(?:-\w+)*)="([^"]*)"/g;
-        let m;
-        while ((m = regex.exec(str)) !== null) attrs[m[1]] = m[2];
-        return attrs;
-    }
-
-    isMovieFormat(name) {
-        return [/\(\d{4}\)/, /\d{4}\./, /HD$|FHD$|4K$/i].some(p => p.test(name));
-    }
-
-    async parseEPG(content) {
-        const start = Date.now();
+    // --- XTREAM EPG FETCH LOGIC ---
+    async getXtreamEpg(streamId) {
+        if (this.providerName !== 'xtream') return null;
+        const url = `${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_short_epg&stream_id=${streamId}`;
+        
         try {
-            const xml2js = require('xml2js');
-            const parser = new xml2js.Parser();
-            const result = await parser.parseStringPromise(content);
-            const epgData = {};
-            if (result.tv && result.tv.programme) {
-                for (const prog of result.tv.programme) {
-                    const ch = prog.$.channel;
-                    if (!epgData[ch]) epgData[ch] = [];
-                    epgData[ch].push({
-                        start: prog.$.start,
-                        stop: prog.$.stop,
-                        title: prog.title ? prog.title[0]._ || prog.title[0] : 'Unknown',
-                        desc: prog.desc ? prog.desc[0]._ || prog.desc[0] : ''
-                    });
-                }
+            const response = await fetch(url);
+            const data = await response.json();
+            if (data && data.epg_listings && data.epg_listings.length > 0) {
+                return data.epg_listings.map(prog => ({
+                    title: Buffer.from(prog.title, 'base64').toString('utf-8'),
+                    description: Buffer.from(prog.description, 'base64').toString('utf-8'),
+                    startTime: new Date(prog.start),
+                    stopTime: new Date(prog.end)
+                }));
             }
-            this.log.debug('EPG parsed', {
-                channels: Object.keys(epgData).length,
-                programmes: Object.values(epgData).reduce((a, b) => a + b.length, 0),
-                ms: Date.now() - start
-            });
-            return epgData;
         } catch (e) {
-            this.log.warn('EPG parse failed', e.message);
-            return {};
+            this.log.error('Xtream EPG Fetch Failed', e.message);
         }
-    }
-
-    parseEPGTime(s) {
-        if (!s) return new Date();
-        const m = s.match(/^(\d{14})(?:\s*([+\-]\d{4}))?/);
-        if (m) {
-            const base = m[1];
-            const tz = m[2] || null;
-            const year = parseInt(base.slice(0, 4), 10);
-            const month = parseInt(base.slice(4, 6), 10) - 1;
-            const day = parseInt(base.slice(6, 8), 10);
-            const hour = parseInt(base.slice(8, 10), 10);
-            const min = parseInt(base.slice(10, 12), 10);
-            const sec = parseInt(base.slice(12, 14), 10);
-            let date;
-            if (tz) {
-                const iso = `${year}-${(month + 1).toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}T${hour.toString().padStart(2, '0')}:${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}${tz}`;
-                const parsed = new Date(iso);
-                if (!isNaN(parsed.getTime())) date = parsed;
-            }
-            if (!date) date = new Date(year, month, day, hour, min, sec);
-            if (this.config.epgOffsetHours) {
-                date = new Date(date.getTime() + this.config.epgOffsetHours * 3600000);
-            }
-            return date;
-        }
-        const d = new Date(s);
-        if (this.config.epgOffsetHours && !isNaN(d.getTime()))
-            return new Date(d.getTime() + this.config.epgOffsetHours * 3600000);
-        return d;
+        return null;
     }
 
     getCurrentProgram(channelId) {
         if (!channelId || !this.epgData[channelId]) return null;
         const now = new Date();
         for (const p of this.epgData[channelId]) {
-            const start = this.parseEPGTime(p.start);
-            const stop = this.parseEPGTime(p.stop);
-            if (now >= start && now <= stop) {
-                return { title: p.title, description: p.desc, start, stop, startTime: start, stopTime: stop };
-            }
+            const start = new Date(p.start);
+            const stop = new Date(p.stop);
+            if (now >= start && now <= stop) return { title: p.title, description: p.desc, startTime: start, stopTime: stop };
         }
         return null;
     }
 
-    getUpcomingPrograms(channelId, limit = 5) {
-        if (!channelId || !this.epgData[channelId]) return [];
-        const now = new Date();
-        const upcoming = [];
-        for (const p of this.epgData[channelId]) {
-            const start = this.parseEPGTime(p.start);
-            if (start > now && upcoming.length < limit) {
-                upcoming.push({
-                    title: p.title,
-                    description: p.desc,
-                    startTime: start,
-                    stopTime: this.parseEPGTime(p.stop)
-                });
-            }
-        }
-        return upcoming.sort((a, b) => a.startTime - b.startTime);
-    }
-
-    async ensureSeriesInfo(seriesId) {
-        if (!seriesId) return null;
-        if (this.seriesInfoCache.has(seriesId)) return this.seriesInfoCache.get(seriesId);
-
-        try {
-            const providerModule = require(`./src/js/providers/${this.providerName}Provider.js`);
-            if (typeof providerModule.fetchSeriesInfo === 'function') {
-                const info = await providerModule.fetchSeriesInfo(this, seriesId);
-                this.seriesInfoCache.set(seriesId, info);
-                return info;
-            }
-        } catch (e) {
-            this.log.warn('Series info fetch failed', seriesId, e.message);
-        }
-        // Fallback empty structure
-        const empty = { videos: [] };
-        this.seriesInfoCache.set(seriesId, empty);
-        return empty;
-    }
-
     async updateData(force = false) {
         const now = Date.now();
-        if (!force && CACHE_ENABLED) {
-            if (this.lastUpdate && now - this.lastUpdate < this.updateInterval) {
-                this.log.debug('Skip update (global interval)');
-                return;
-            }
-            if ((this.channels.length || this.movies.length || this.series.length) && now - this.lastUpdate < 900000) {
-                this.log.debug('Skip update (recent minor interval)');
-                return;
-            }
-        }
+        if (!force && this.lastUpdate && now - this.lastUpdate < 900000) return;
         try {
-            const start = Date.now();
             const providerModule = require(`./src/js/providers/${this.providerName}Provider.js`);
             await providerModule.fetchData(this);
             this.lastUpdate = Date.now();
             if (CACHE_ENABLED) await this.saveToCache();
-            this.buildGenresInManifest();
-            this.log.debug('Data update complete', {
-                channels: this.channels.length,
-                movies: this.movies.length,
-                series: this.series.length,
-                ms: Date.now() - start
-            });
         } catch (e) {
             this.log.error('[UPDATE] Failed:', e.message);
         }
     }
 
     deriveFallbackLogoUrl(item) {
-        const logoAttr = item.attributes?.['tvg-logo'];
-        if (logoAttr && logoAttr.trim()) return logoAttr;
-        const tvgId = item.attributes?.['tvg-id'] || item.attributes?.['tvg-name'];
-        if (!tvgId)
-            return `https://via.placeholder.com/300x400/333333/FFFFFF?text=${encodeURIComponent(item.name)}`;
-        return `logo/${encodeURIComponent(tvgId)}.png`;
+        return item.attributes?.['tvg-logo'] || `https://via.placeholder.com/300x400/333333/FFFFFF?text=${encodeURIComponent(item.name)}`;
     }
 
     generateMetaPreview(item) {
-    const meta = { id: item.id, type: item.type, name: item.name };
-    if (item.type === 'tv') {
-        // Căutăm ID-ul EPG în atributele tvg-id sau tvg-name din M3U
-        const epgId = item.attributes?.['tvg-id'] || item.attributes?.['tvg-name'];
-        const current = this.getCurrentProgram(epgId);
-        
-        meta.description = current
-            ? `📡 ACUM: ${current.title}${current.description ? `\n${current.description}` : ''}`
-            : '📡 Program indisponibil';
-        
+        const meta = { id: item.id, type: item.type, name: item.name };
         meta.poster = this.deriveFallbackLogoUrl(item);
-            meta.genres = item.category
-                ? [item.category]
-                : (item.attributes?.['group-title'] ? [item.attributes['group-title']] : ['Live TV']);
-            meta.runtime = 'Live';
-        } else if (item.type === 'movie') {
-            meta.poster = item.poster ||
-                item.attributes?.['tvg-logo'] ||
-                `https://via.placeholder.com/300x450/CC6600/FFFFFF?text=${encodeURIComponent(item.name)}`;
-            meta.year = item.year;
-            if (!meta.year) {
-                const m = item.name.match(/\((\d{4})\)/);
-                if (m) meta.year = parseInt(m[1]);
-            }
-            meta.description = item.plot || item.attributes?.['plot'] || `Movie: ${item.name}`;
-            meta.genres = item.attributes?.['group-title'] ? [item.attributes['group-title']] : ['Movie'];
-        } else if (item.type === 'series') {
-            meta.poster = item.poster ||
-                item.attributes?.['tvg-logo'] ||
-                `https://via.placeholder.com/300x450/3366CC/FFFFFF?text=${encodeURIComponent(item.name)}`;
-            meta.description = item.plot || item.attributes?.['plot'] || 'Series / Show';
-            meta.genres = item.category
-                ? [item.category]
-                : (item.attributes?.['group-title'] ? [item.attributes['group-title']] : ['Series']);
-        }
+        meta.runtime = 'Live';
         return meta;
     }
 
-    getStream(id) {
-        // Episode streams
-        if (id.startsWith('iptv_series_ep_')) {
-            const epEntry = this.lookupEpisodeById(id);
-            if (!epEntry) return null;
-            return {
-                url: epEntry.url,
-                title: `${epEntry.title || 'Episode'}${epEntry.season ? ` S${epEntry.season}E${epEntry.episode}` : ''}`,
-                behaviorHints: { notWebReady: true }
-            };
-        }
+    async getDetailedMeta(id) {
         const all = [...this.channels, ...this.movies];
         const item = all.find(i => i.id === id);
         if (!item) return null;
-        return {
-            url: item.url,
-            title: item.type === 'tv' ? `${item.name} - Live` : item.name,
-            behaviorHints: { notWebReady: true }
-        };
-    }
 
-    lookupEpisodeById(epId) {
-        // Check cached series info
-        for (const [, info] of this.seriesInfoCache.entries()) {
-            if (info && Array.isArray(info.videos)) {
-                const found = info.videos.find(v => v.id === epId);
-                if (found) return found;
-            }
-        }
-        // Direct provider inline index
-        for (const arr of this.directSeriesEpisodeIndex.values()) {
-            const found = arr.find(v => v.id === epId);
-            if (found) return found;
-        }
-        return null;
-    }
-
-    async buildSeriesMeta(seriesItem) {
-        const seriesIdRaw = seriesItem.series_id || seriesItem.id.replace(/^iptv_series_/, '');
-        const info = await this.ensureSeriesInfo(seriesIdRaw);
-        const videos = (info?.videos || []).map(v => ({
-            id: v.id,
-            title: v.title,
-            season: v.season,
-            episode: v.episode,
-            released: v.released || null,
-            thumbnail: v.thumbnail || seriesItem.poster || seriesItem.attributes?.['tvg-logo']
-        }));
-
-        return {
-            id: seriesItem.id,
-            type: 'series',
-            name: seriesItem.name,
-            poster: seriesItem.poster ||
-                seriesItem.attributes?.['tvg-logo'] ||
-                `https://via.placeholder.com/300x450/3366CC/FFFFFF?text=${encodeURIComponent(seriesItem.name)}`,
-            description: seriesItem.plot || seriesItem.attributes?.['plot'] || 'Series / Show',
-            genres: seriesItem.category
-                ? [seriesItem.category]
-                : (seriesItem.attributes?.['group-title'] ? [seriesItem.attributes['group-title']] : ['Series']),
-            videos
-        };
-    }
-
-    async getDetailedMetaAsync(id, type) {
-        if (type === 'series' || id.startsWith('iptv_series_')) {
-            const seriesItem = this.series.find(s => s.id === id);
-            if (!seriesItem) return null;
-            return await this.buildSeriesMeta(seriesItem);
-        }
-        // fallback sync path
-        return this.getDetailedMeta(id);
-    }
-
-    getDetailedMeta(id) {
-        const all = [...this.channels, ...this.movies];
-        const item = all.find(i => i.id === id);
-        if (!item) return null;
         if (item.type === 'tv') {
             const epgId = item.attributes?.['tvg-id'] || item.attributes?.['tvg-name'];
-            const current = this.getCurrentProgram(epgId);
-            const upcoming = this.getUpcomingPrograms(epgId, 3);
-            let description = `📺 CHANNEL: ${item.name}`;
-            if (current) {
-                const start = current.startTime?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) || '';
-                const end = current.stopTime?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) || '';
-                description += `\n\n📡 NOW: ${current.title}${start && end ? ` (${start}-${end})` : ''}`;
-                if (current.description) description += `\n\n${current.description}`;
-            }
-            if (upcoming.length) {
-                description += '\n\n📅 UPCOMING:\n';
-                for (const p of upcoming) {
-                    description += `${p.startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${p.title}\n`;
+            let current = this.getCurrentProgram(epgId);
+            let upcoming = [];
+
+            if (!current && this.providerName === 'xtream') {
+                const streamId = id.split('_').pop();
+                const xtreamPrograms = await this.getXtreamEpg(streamId);
+                if (xtreamPrograms) {
+                    current = xtreamPrograms[0];
+                    upcoming = xtreamPrograms.slice(1, 4);
                 }
             }
-            return {
-                id: item.id,
-                type: 'tv',
-                name: item.name,
-                poster: this.deriveFallbackLogoUrl(item),
-                description,
-                genres: item.category
-                    ? [item.category]
-                    : (item.attributes?.['group-title'] ? [item.attributes['group-title']] : ['Live TV']),
-                runtime: 'Live'
-            };
-        } else {
-            let year = item.year;
-            if (!year) {
-                const m = item.name.match(/\((\d{4})\)/);
-                if (m) year = parseInt(m[1]);
+
+            let description = `📺 CHANNEL: ${item.name}`;
+            if (current) {
+                const s = current.startTime?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                const e = current.stopTime?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                description += `\n\n🔴 ACUM: ${current.title} (${s} - ${e})\n${current.description || ''}`;
             }
-            const description = item.plot || item.attributes?.['plot'] || `Movie: ${item.name}`;
-            return {
-                id: item.id,
-                type: 'movie',
-                name: item.name,
-                poster: item.poster || item.attributes?.['tvg-logo'] ||
-                    `https://via.placeholder.com/300x450/CC6600/FFFFFF?text=${encodeURIComponent(item.name)}`,
-                description,
-                genres: item.attributes?.['group-title'] ? [item.attributes['group-title']] : ['Movie'],
-                year
-            };
+            if (upcoming.length) {
+                description += '\n\n📅 URMEAZĂ:\n' + upcoming.map(p => `${p.startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${p.title}`).join('\n');
+            }
+
+            return { id: item.id, type: 'tv', name: item.name, poster: this.deriveFallbackLogoUrl(item), description, runtime: 'Live' };
         }
+        return this.generateMetaPreview(item);
+    }
+
+    getStream(id) {
+        const all = [...this.channels, ...this.movies];
+        const item = all.find(i => i.id === id);
+        if (!item) return null;
+        return { url: item.url, title: item.name, behaviorHints: { notWebReady: true } };
     }
 }
 
 async function createAddon(config) {
     const manifest = {
         id: ADDON_ID,
-        version: "2.0.0",
+        version: "2.1.0",
         name: ADDON_NAME,
-        description: "IPTV addon (M3U / EPG / Xtream) with encrypted configs, caching & series support (Xtream + Direct)",
         resources: ["catalog", "stream", "meta"],
         types: ["tv", "movie", "series"],
-        catalogs: [
-            {
-                type: 'tv',
-                id: 'iptv_channels',
-                name: 'IPTV Channels',
-                extra: [{ name: 'genre' }, { name: 'search' }, { name: 'skip' }],
-                genres: []
-            },
-            {
-                type: 'movie',
-                id: 'iptv_movies',
-                name: 'IPTV Movies',
-                extra: [{ name: 'search' }, { name: 'skip' }],
-                genres: []
-            },
-            {
-                type: 'series',
-                id: 'iptv_series',
-                name: 'IPTV Series',
-                extra: [{ name: 'genre' }, { name: 'search' }, { name: 'skip' }],
-                genres: []
-            }
-        ],
-        idPrefixes: ["iptv_"],
-        behaviorHints: {
-            configurable: true,
-            configurationRequired: false
-        }
+        catalogs: [{ type: 'tv', id: 'iptv_channels', name: 'IPTV Channels', extra: [{ name: 'search' }] }],
+        idPrefixes: ["iptv_"]
     };
-
-    config.instanceId = config.instanceId ||
-        (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(8).toString('hex'));
-
-    const cacheKey = createCacheKey(config);
-    const debugFlag = !!config.debug || DEBUG_ENV;
-    if (debugFlag) {
-        console.log('[DEBUG] createAddon start', { cacheKey, provider: config.provider, includeSeries: config.includeSeries !== false });
-    } else {
-        console.log(`[ADDON] Cache ${CACHE_ENABLED ? 'ENABLED' : 'DISABLED'} for config ${cacheKey}`);
-    }
-
-    if (CACHE_ENABLED && buildPromiseCache.has(cacheKey)) {
-        if (debugFlag) console.log('[DEBUG] Reusing build promise', cacheKey);
-        return buildPromiseCache.get(cacheKey);
-    }
 
     const buildPromise = (async () => {
         const builder = new addonBuilder(manifest);
         const addonInstance = new M3UEPGAddon(config, manifest);
         await addonInstance.loadFromCache();
         await addonInstance.updateData(true);
-        addonInstance.buildGenresInManifest();
 
         builder.defineCatalogHandler(async (args) => {
-            const start = Date.now();
-            try {
-                addonInstance.updateData().catch(() => { });
-                let items = [];
-                if (args.type === 'tv' && args.id === 'iptv_channels') {
-                    items = addonInstance.channels;
-                } else if (args.type === 'movie' && args.id === 'iptv_movies') {
-                    items = addonInstance.movies;
-                } else if (args.type === 'series' && args.id === 'iptv_series') {
-                    if (addonInstance.config.includeSeries !== false)
-                        items = addonInstance.series;
-                }
-                const extra = args.extra || {};
-                if (extra.genre && extra.genre !== 'All Channels') {
-                    items = items.filter(i =>
-                        (i.category && i.category === extra.genre) ||
-                        (i.attributes && i.attributes['group-title'] === extra.genre)
-                    );
-                }
-                if (extra.search) {
-                    const q = extra.search.toLowerCase();
-                    items = items.filter(i => i.name.toLowerCase().includes(q));
-                }
-                const metas = items.slice(0, 200).map(i => addonInstance.generateMetaPreview(i));
-                if (addonInstance.config.debug) {
-                    console.log('[DEBUG] Catalog handler', {
-                        type: args.type,
-                        id: args.id,
-                        totalItems: items.length,
-                        returned: metas.length,
-                        ms: Date.now() - start
-                    });
-                }
-                return { metas };
-            } catch (e) {
-                console.error('[CATALOG] Error', e);
-                return { metas: [] };
-            }
+            const items = args.type === 'tv' ? addonInstance.channels : [];
+            return { metas: items.slice(0, 100).map(i => addonInstance.generateMetaPreview(i)) };
         });
 
-        builder.defineStreamHandler(async ({ type, id }) => {
-            try {
-                if (id.startsWith('iptv_series_ep_')) {
-                    const stream = addonInstance.getStream(id);
-                    if (!stream) return { streams: [] };
-                    if (addonInstance.config.debug) {
-                        console.log('[DEBUG] Series Episode Stream request', { id, url: stream.url });
-                    }
-                    return { streams: [stream] };
-                }
-                const stream = addonInstance.getStream(id);
-                if (!stream) return { streams: [] };
-                if (addonInstance.config.debug) {
-                    console.log('[DEBUG] Stream request', { id, url: stream.url });
-                }
-                return { streams: [stream] };
-            } catch (e) {
-                console.error('[STREAM] Error', e);
-                return { streams: [] };
-            }
+        builder.defineStreamHandler(async ({ id }) => {
+            const stream = addonInstance.getStream(id);
+            return { streams: stream ? [stream] : [] };
         });
 
-        builder.defineMetaHandler(async ({ type, id }) => {
-            try {
-                if (type === 'series' || id.startsWith('iptv_series_')) {
-                    const meta = await addonInstance.getDetailedMetaAsync(id, 'series');
-                    if (addonInstance.config.debug) {
-                        console.log('[DEBUG] Series meta request', { id, videos: meta?.videos?.length });
-                    }
-                    return { meta };
-                }
-                const meta = addonInstance.getDetailedMeta(id);
-                if (addonInstance.config.debug) {
-                    console.log('[DEBUG] Meta request', { id, type });
-                }
-                return { meta };
-            } catch (e) {
-                console.error('[META] Error', e);
-                return { meta: null };
-            }
+        builder.defineMetaHandler(async ({ id }) => {
+            const meta = await addonInstance.getDetailedMeta(id);
+            return { meta };
         });
 
         return builder.getInterface();
     })();
 
-    if (CACHE_ENABLED) buildPromiseCache.set(cacheKey, buildPromise);
-    try {
-        const iface = await buildPromise;
-        return iface;
-    } finally {
-        // Keep promise cached
-    }
+    return await buildPromise;
 }
 
 module.exports = createAddon;
