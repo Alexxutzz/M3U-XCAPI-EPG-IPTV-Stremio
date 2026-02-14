@@ -1,35 +1,52 @@
-const { getRouter } = require("stremio-addon-sdk");
 const createAddon = require("./addon");
-
-// NOTE: In a serverless environment, cold starts will rebuild & preload every time.
-// You may wish to add a timeout guard or skip full preload if execution time is tight.
+const { getRouter } = require("stremio-addon-sdk");
+const path = require("path");
+const fs = require("fs");
 
 let cachedInterface = null;
-let cachedConfigKey = null;
-
-async function getInterface(eventConfig = {}) {
-    const key = JSON.stringify(eventConfig);
-    if (cachedInterface && cachedConfigKey === key) {
-        return cachedInterface;
-    }
-    cachedInterface = await createAddon(eventConfig);
-    cachedConfigKey = key;
-    return cachedInterface;
-}
 
 module.exports = async function (req, res) {
     try {
-        // This simplistic serverless handler does not parse per-request configs via URL like server.js.
-        // If you want dynamic configs in serverless, you'd replicate the logic from server.js here.
-        const addonInterface = await getInterface();
-        const router = getRouter(addonInterface);
+        // 1. Servire Pagina Configurare
+        if (req.url === '/' || req.url === '/configure') {
+            const configPath = path.join(__dirname, 'configure.html');
+            if (fs.existsSync(configPath)) {
+                res.setHeader('Content-Type', 'text/html');
+                return res.end(fs.readFileSync(configPath));
+            }
+        }
+
+        // 2. Mapare Variabile Vercel -> Addon Config
+        // Am mapat numele tale din .env/Vercel pe cheile din addon.js
+        const vConfig = {
+            provider: process.env.DATA_PROVIDER || 'xtream',
+            // Xtream specific
+            xtreamUrl: process.env.XTREAM_HOST || process.env.XTREAM_URL,
+            xtreamUsername: process.env.XTREAM_USER || process.env.XTREAM_USERNAME,
+            xtreamPassword: process.env.XTREAM_PASSWORD,
+            // Direct specific (dacă e cazul)
+            m3uUrl: process.env.M3U_URL,
+            epgUrl: process.env.EPG_URL,
+            // General
+            debug: process.env.DEBUG_MODE === 'true',
+            includeSeries: process.env.INCLUDE_SERIES !== 'false'
+        };
+
+        // 3. Singleton pentru performanță
+        if (!cachedInterface) {
+            console.log("[SERVERLESS] Initializing addon with provider:", vConfig.provider);
+            cachedInterface = await createAddon(vConfig);
+        }
+
+        const router = getRouter(cachedInterface);
         router(req, res, function () {
             res.statusCode = 404;
             res.end();
         });
+
     } catch (e) {
-        console.error('[SERVERLESS] Error:', e);
+        console.error('[SERVERLESS] Critical Error:', e);
         res.statusCode = 500;
-        res.end(JSON.stringify({ error: 'Serverless addon error' }));
+        res.end(JSON.stringify({ error: 'Check Vercel Logs', message: e.message }));
     }
 };
