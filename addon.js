@@ -1,10 +1,10 @@
-// IPTV Stremio Addon - Vercel Optimized (ONLY LIVE TV + EPG)
+// IPTV Stremio Addon - NO SORTING - FULL EPG - 50k+ SUPPORT
 require('dotenv').config();
 const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
-const ADDON_NAME = "IPTV Live Romania"; // Poți schimba numele aici
-const ADDON_ID = "org.stremio.live-only.optimized";
+const ADDON_NAME = "IPTV Streamer Pro";
+const ADDON_ID = "org.stremio.iptv-raw.optimized";
 
 class M3UEPGAddon {
     constructor(config = {}) {
@@ -13,7 +13,6 @@ class M3UEPGAddon {
         this.lastUpdate = 0;
     }
 
-    // Progres bar vizual pentru EPG
     getProgressBar(start, end) {
         const now = new Date();
         const progress = Math.max(0, Math.min(100, Math.round(((now - start) / (end - start)) * 100)));
@@ -36,7 +35,6 @@ class M3UEPGAddon {
     }
 
     async updateData() {
-        // Cache 20 minute
         if (Date.now() - this.lastUpdate < 1200000) return; 
         try {
             const provider = require(`./src/js/providers/xtreamProvider.js`);
@@ -50,17 +48,14 @@ async function createAddon(config) {
     const addon = new M3UEPGAddon(config);
     const builder = new addonBuilder({
         id: ADDON_ID,
-        version: "3.1.0",
+        version: "3.2.0",
         name: ADDON_NAME,
         resources: ["catalog", "stream", "meta"],
         types: ["tv"],
-        catalogs: [
-            { type: 'tv', id: 'iptv_channels', name: 'Canale TV Live', extra: [{ name: 'search' }] }
-        ],
+        catalogs: [{ type: 'tv', id: 'iptv_channels', name: 'Toate Canalele', extra: [{ name: 'search' }] }],
         idPrefixes: ["iptv_"]
     });
 
-    // --- HANDLER CATALOG ---
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
         let results = addon.channels;
@@ -70,8 +65,9 @@ async function createAddon(config) {
             results = results.filter(i => i.name.toLowerCase().includes(q));
         }
 
+        // Returnăm tot fără sortare suplimentară
         return { 
-            metas: results.slice(0, 500).map(i => ({
+            metas: results.map(i => ({
                 id: i.id,
                 type: 'tv',
                 name: i.name,
@@ -80,7 +76,6 @@ async function createAddon(config) {
         };
     });
 
-    // --- HANDLER META (Detalii Canal + EPG) ---
     builder.defineMetaHandler(async ({ id }) => {
         await addon.updateData();
         const item = addon.channels.find(i => i.id === id);
@@ -89,7 +84,7 @@ async function createAddon(config) {
         const streamId = id.split('_').pop();
         const epg = await addon.getXtreamEpg(streamId);
         
-        let description = `📺 Canal: ${item.name}\n📂 Categorie: ${item.category || 'Live'}\n`;
+        let description = `📺 Canal: ${item.name}\n📂 Categorie: ${item.category}\n`;
         description += `──────────────────────────\n`;
 
         if (epg && epg[0]) {
@@ -105,13 +100,12 @@ async function createAddon(config) {
                 });
             }
         } else {
-            description += `📡 Ghid TV (EPG) indisponibil momentan pentru acest canal.`;
+            description += `📡 Ghid TV (EPG) momentan indisponibil.`;
         }
 
         return { meta: { id, type: 'tv', name: item.name, description, poster: item.logo || "" } };
     });
 
-    // --- HANDLER STREAM ---
     builder.defineStreamHandler(async ({ id }) => {
         const item = addon.channels.find(i => i.id === id);
         return { streams: item ? [{ url: item.url, title: item.name }] : [] };
