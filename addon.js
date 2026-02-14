@@ -3,48 +3,53 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
 const ADDON_NAME = "IPTV Stremio";
-const ADDON_ID = "org.stremio.iptv.pro.v242";
-const VERSION = "2.4.2";
+const ADDON_ID = "org.stremio.iptv.pro.v250";
+const VERSION = "2.5.0";
 const RO_TIME = { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Bucharest', hour12: false };
 
-// --- CONFIGURARE CANALE RECOMANDATE (DOAR CELE SOLICITATE) ---
+// --- LISTA TA DE CANALE FAVORITE ---
 const FEATURED_CHANNELS = [
-    "SKY SPORTS MAIN EVENT", 
-    "SKY SPORTS PREMIER LEAGUE", 
-    "SKY SPORTS FOOTBALL", 
-    "TNT SPORTS 1", 
-    "TNT SPORTS 2",
-    "PRO TV", 
-    "DIGI SPORT 1", 
-    "DIGI SPORT 2", 
-    "DIGI SPORT 3", 
-    "DIGI SPORT 4",
-    "ANTENA 1"
+    "SKY SPORTS MAIN EVENT", "SKY SPORTS PREMIER LEAGUE", "SKY SPORTS FOOTBALL", 
+    "TNT SPORTS 1", "TNT SPORTS 2", "PRO TV", "DIGI SPORT 1", "DIGI SPORT 2", 
+    "DIGI SPORT 3", "DIGI SPORT 4", "ANTENA 1"
 ];
+
+// --- MOTOR DE LOGOURI HD (REPARĂ SCREENSHOT_4) ---
+const getSmartLogo = (baseName, originalLogo) => {
+    // Dacă logoul original este valid și nu e placeholder, îl folosim
+    if (originalLogo && originalLogo.startsWith('http') && !originalLogo.includes('no-logo') && !originalLogo.includes('placeholder')) {
+        return originalLogo;
+    }
+
+    const slug = baseName.toLowerCase()
+        .replace(/sky sports/g, 'sky-sports')
+        .replace(/tnt sports/g, 'tnt-sports')
+        .replace(/[^a-z0-9]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+    
+    // Sursă 1: Baza de date pentru canale RO/Internaționale
+    // Sursă 2: Backup logo-uri sport UK
+    return `https://iptv-org.github.io/logos/languages/ron/${slug}.png`;
+};
 
 const cleanChannelName = (name) => {
     if (!name) return { baseName: "Canal TV", quality: "" };
     let quality = "";
     const lower = name.toLowerCase();
     
-    if (lower.includes("4k")) quality = "4K Ultra HD";
+    if (lower.includes("4k")) quality = "4K UHD";
     else if (lower.includes("fhd") || lower.includes("1080")) quality = "Full HD";
-    else if (lower.includes("hd") || lower.includes("720")) quality = "HD Quality";
+    else if (lower.includes("hd") || lower.includes("720")) quality = "HD";
 
     let clean = name
-        .replace(/^(RO|UK|US|IT|FR|ES|DE)[:| \-|\|]+/gi, '') 
+        .replace(/^(RO|UK|US|IT|FR|ES|DE|NOWTV)[:| \-|\|]+/gi, '') 
         .replace(/FHD|HD|SD|1080p|720p|4K|UHD|H\.265|HEVC|BACKUP|ALT/gi, '')
         .replace(/\[.*\]|\(.*\)/g, '')
         .replace(/\s+/g, ' ')
         .trim();
 
     return { baseName: clean || name, quality: quality };
-};
-
-const getSmartLogo = (baseName, originalLogo) => {
-    if (originalLogo && originalLogo.startsWith('http') && !originalLogo.includes('no-logo')) return originalLogo;
-    const slug = baseName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-    return `https://iptv-org.github.io/logos/languages/ron/${slug}.png`;
 };
 
 class M3UEPGAddon {
@@ -88,10 +93,7 @@ async function createAddon(config) {
         catalogs: [
             { 
                 type: 'tv', id: 'iptv_dynamic', name: '📺 IPTV Stremio', 
-                extra: [
-                    { name: 'search', isRequired: false },
-                    { name: 'genre', options: ['Sport', 'Filme', 'Documentare', 'Stiri'], isRequired: false }
-                ] 
+                extra: [{ name: 'search', isRequired: false }, { name: 'genre', options: ['Sport', 'Filme', 'Documentare', 'Stiri'], isRequired: false }] 
             }
         ],
         idPrefixes: ["group_"]
@@ -106,13 +108,12 @@ async function createAddon(config) {
         if (searchInput) {
             const searchWords = searchInput.split(/\s+/).filter(word => word.length > 0);
             results = addon.channels.filter(item => {
-                const channelNameLower = item.name.toLowerCase();
-                return searchWords.every(word => channelNameLower.includes(word));
+                const nameLower = item.name.toLowerCase();
+                return searchWords.every(word => nameLower.includes(word));
             });
         } else if (genreInput) {
             results = addon.channels.filter(i => (i.attributes?.['group-title'] || "").toLowerCase().includes(genreInput));
         } else {
-            // Modul Discover cu noua listă restrânsă
             results = addon.channels.filter(i => FEATURED_CHANNELS.some(f => i.name.toUpperCase().includes(f)));
         }
 
@@ -157,36 +158,20 @@ async function createAddon(config) {
             const elapsed = now - cur.start;
             const progress = Math.max(0, Math.min(100, Math.round((elapsed / (cur.end - cur.start)) * 100)));
             const bar = "🔵".repeat(Math.round(progress/10)) + "⚪".repeat(10 - Math.round(progress/10));
-            
             description += `🔴 ACUM: ${cur.title.toUpperCase()}\n⏰ ${cur.start.toLocaleTimeString('ro-RO', RO_TIME)} — ${cur.end.toLocaleTimeString('ro-RO', RO_TIME)}\n${bar} ${progress}%\n\n`;
             if (cur.desc) description += `ℹ️ INFO: ${cur.desc.substring(0, 150)}...\n\n`;
-            const next = epg.filter(p => p.start > now).slice(0, 2);
-            if (next.length > 0) {
-                description += `📅 URMEAZĂ:\n`;
-                next.forEach(p => description += `• ${p.start.toLocaleTimeString('ro-RO', RO_TIME)}  ${p.title}\n`);
-            }
         } else {
-            description += `📡 Ghidul TV indisponibil.`;
+            description += `📡 Ghidul TV (EPG) nu este disponibil momentan.`;
         }
 
-        return {
-            meta: {
-                id, type: 'tv', name: targetName, description, 
-                poster: logo, background: logo, logo: logo
-            }
-        };
+        return { meta: { id, type: 'tv', name: targetName, description, poster: logo, background: logo, logo: logo } };
     });
 
     builder.defineStreamHandler(async ({ id }) => {
         if (!id.startsWith("group_")) return { streams: [] };
         const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
         const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
-        return {
-            streams: matches.map(m => ({
-                url: m.url,
-                title: `🌐 Sursă ${cleanChannelName(m.name).quality || 'Standard'}`
-            }))
-        };
+        return { streams: matches.map(m => ({ url: m.url, title: `🌐 Sursă ${cleanChannelName(m.name).quality || 'Standard'}` })) };
     });
 
     return builder.getInterface();
