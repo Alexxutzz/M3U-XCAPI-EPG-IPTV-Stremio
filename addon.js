@@ -1,4 +1,4 @@
-// IPTV Stremio Addon Core - All Channels & Enhanced EPG
+// IPTV Stremio Addon Core - Safe EPG & All Channels
 require('dotenv').config();
 
 const { addonBuilder } = require("stremio-addon-sdk");
@@ -6,7 +6,6 @@ const LRUCache = require("./lruCache");
 const fetch = require('node-fetch');
 
 const dataCache = new LRUCache({ max: 500, ttl: 6 * 3600 * 1000 });
-
 const ADDON_NAME = "M3U/EPG TV Addon";
 const ADDON_ID = "org.stremio.m3u-epg-addon";
 
@@ -17,11 +16,9 @@ class M3UEPGAddon {
         this.manifestRef = manifestRef;
         this.channels = [];
         this.movies = [];
-        this.series = [];
         this.lastUpdate = 0;
     }
 
-    // --- UTILS PENTRU DESIGN EPG ---
     formatTime(date) {
         return date ? date.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' }) : "--:--";
     }
@@ -40,8 +37,20 @@ class M3UEPGAddon {
         const url = `${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_short_epg&stream_id=${streamId}`;
         
         try {
-            const response = await fetch(url, { headers: { 'User-Agent': 'IPTVSmarters/1.0.3' }, timeout: 4000 });
-            const data = await response.json();
+            const response = await fetch(url, { 
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }, 
+                timeout: 3500 
+            });
+
+            const text = await response.text();
+            
+            // Verificăm dacă răspunsul începe cu HTML (eroare de server)
+            if (text.trim().startsWith('<html')) {
+                console.warn(`[EPG] Serverul a blocat cererea pentru ID ${streamId} (HTML returned)`);
+                return null;
+            }
+
+            const data = JSON.parse(text);
             if (data && data.epg_listings && data.epg_listings.length > 0) {
                 return data.epg_listings.map(prog => ({
                     title: prog.title ? Buffer.from(prog.title, 'base64').toString('utf-8') : "Program",
@@ -50,7 +59,10 @@ class M3UEPGAddon {
                     stopTime: new Date(prog.end)
                 }));
             }
-        } catch (e) { console.error('[EPG ERROR]', e.message); }
+        } catch (e) { 
+            // Nu mai logăm eroarea completă ca să nu umplem consola, doar un mesaj scurt
+            console.log(`[EPG Skip] Canalul ${streamId} nu are EPG valid.`); 
+        }
         return null;
     }
 
@@ -59,13 +71,10 @@ class M3UEPGAddon {
         if (!force && this.lastUpdate && now - this.lastUpdate < 900000) return;
 
         try {
-            console.log('[INFO] Fetching all channels from provider...');
             const providerModule = require(`./src/js/providers/${this.providerName}Provider.js`);
             await providerModule.fetchData(this);
-
             this.lastUpdate = Date.now();
-            console.log('[INFO] Success. Total channels loaded:', this.channels.length);
-        } catch (e) { console.error('[CRITICAL ERROR]', e); }
+        } catch (e) { console.error('[UPDATE ERROR]', e.message); }
     }
 
     generateMetaPreview(item) {
@@ -98,7 +107,7 @@ class M3UEPGAddon {
                     desc += `──────────────────────────\n📅 URMEAZĂ:\n`;
                     epg.slice(1, 4).forEach(p => desc += `• ${this.formatTime(p.startTime)} - ${p.title}\n`);
                 }
-            } else { desc += "📡 Program indisponibil."; }
+            } else { desc += "📡 Program indisponibil (Serverul a blocat cererea)."; }
             meta.description = desc;
         }
         return meta;
@@ -108,7 +117,7 @@ class M3UEPGAddon {
 async function createAddon(config) {
     const manifest = {
         id: ADDON_ID,
-        version: "2.1.4",
+        version: "2.1.5",
         name: ADDON_NAME,
         resources: ["catalog", "stream", "meta"],
         types: ["tv", "movie"],
@@ -129,7 +138,6 @@ async function createAddon(config) {
             const q = args.extra.search.toLowerCase();
             items = items.filter(i => i.name.toLowerCase().includes(q));
         }
-        // Limităm afișarea la 500 pentru a nu bloca interfața Stremio
         return { metas: items.slice(0, 500).map(i => addonInstance.generateMetaPreview(i)) };
     });
 
