@@ -20,14 +20,17 @@ module.exports = async function (req, res) {
         // Am mapat numele tale din .env/Vercel pe cheile din addon.js
         const vConfig = {
             provider: process.env.DATA_PROVIDER || 'xtream',
-            // Xtream specific
             xtreamUrl: process.env.XTREAM_HOST || process.env.XTREAM_URL,
             xtreamUsername: process.env.XTREAM_USER || process.env.XTREAM_USERNAME,
             xtreamPassword: process.env.XTREAM_PASSWORD,
-            // Direct specific (dacă e cazul)
             m3uUrl: process.env.M3U_URL,
-            epgUrl: process.env.EPG_URL,
-            // General
+            
+            // --- LOGICA EPG ADĂUGATĂ ---
+            epgUrl: process.env.EPG_URL, 
+            enableEpg: !!process.env.EPG_URL, // Activează automat dacă există URL
+            epgOffsetHours: parseInt(process.env.EPG_OFFSET || "0"), // Ajustează ora (+1, -2 etc.)
+            // ---------------------------
+
             debug: process.env.DEBUG_MODE === 'true',
             includeSeries: process.env.INCLUDE_SERIES !== 'false'
         };
