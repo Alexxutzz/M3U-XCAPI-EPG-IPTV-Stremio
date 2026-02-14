@@ -3,12 +3,27 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
 const ADDON_NAME = "IPTV Stremio";
-const ADDON_ID = "org.stremio.iptv.pro.ultra";
+const ADDON_ID = "org.stremio.iptv.pro.v210";
+const VERSION = "2.1.0";
 const RO_TIME = { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Bucharest', hour12: false };
 
-// --- UTILS: CURĂȚARE ȘI GRUPARE ---
+// --- LOGICĂ LOGO-URI HD (FALLBACK) ---
+const getSmartLogo = (baseName, originalLogo) => {
+    if (originalLogo && originalLogo.startsWith('http') && !originalLogo.includes('no-logo')) {
+        return originalLogo;
+    }
+    // Transformăm numele în format slug: "Digi Sport 1" -> "digi-sport-1"
+    const slug = baseName.toLowerCase()
+        .replace(/[^a-z0-9]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+    
+    // Sursă externă de logo-uri HD (iptv-org)
+    return `https://iptv-org.github.io/logos/languages/ron/${slug}.png`;
+};
+
 const cleanChannelName = (name) => {
-    if (!name) return { baseName: "Unknown Channel", quality: "" };
+    if (!name) return { baseName: "Canal TV", quality: "" };
     let quality = "";
     const lower = name.toLowerCase();
     
@@ -23,7 +38,7 @@ const cleanChannelName = (name) => {
         .replace(/\s+/g, ' ') 
         .trim();
 
-    return { baseName: clean || "General Channel", quality: quality };
+    return { baseName: clean || "Canal General", quality: quality };
 };
 
 class M3UEPGAddon {
@@ -41,13 +56,11 @@ class M3UEPGAddon {
     }
 
     async updateData() {
-        // Cache 15 min pentru a preveni blocarea IP-ului și a mări viteza de search
         if (Date.now() - this.lastUpdate < 900000 && this.channels.length > 0) return;
         try {
             const provider = require(`./src/js/providers/xtreamProvider.js`);
             await provider.fetchData(this);
             this.lastUpdate = Date.now();
-            console.log(`Bază de date actualizată: ${this.channels.length} surse.`);
         } catch (e) { console.error("Update Error:", e.message); }
     }
 
@@ -71,7 +84,7 @@ async function createAddon(config) {
     const addon = new M3UEPGAddon(config);
     const builder = new addonBuilder({
         id: ADDON_ID,
-        version: "11.0.0",
+        version: VERSION,
         name: ADDON_NAME,
         resources: ["catalog", "stream", "meta"],
         types: ["tv"],
@@ -94,7 +107,6 @@ async function createAddon(config) {
 
         if (!q && !g) return { metas: [] };
 
-        // Filtrare și Gruparea surselor pentru a evita duplicatele din Screenshot_2
         const uniqueChannels = new Map();
         
         addon.channels.forEach(item => {
@@ -104,11 +116,12 @@ async function createAddon(config) {
             if (nameMatch && groupMatch) {
                 const { baseName } = cleanChannelName(item.name);
                 if (!uniqueChannels.has(baseName)) {
+                    const logo = getSmartLogo(baseName, item.attributes?.['tvg-logo'] || item.logo);
                     uniqueChannels.set(baseName, {
                         id: `group_${Buffer.from(baseName).toString('hex')}`,
                         type: 'tv',
                         name: baseName,
-                        poster: item.attributes?.['tvg-logo'] || item.logo || "",
+                        poster: logo,
                         posterShape: 'square'
                     });
                 }
@@ -125,6 +138,7 @@ async function createAddon(config) {
         
         if (matches.length === 0) return { meta: null };
         const first = matches[0];
+        const logo = getSmartLogo(targetName, first.attributes?.['tvg-logo'] || first.logo);
         
         const streamId = first.id.split('_').pop();
         const epg = await addon.getXtreamEpg(streamId);
@@ -148,15 +162,13 @@ async function createAddon(config) {
                 next.forEach(p => description += `• ${p.start.toLocaleTimeString('ro-RO', RO_TIME)}  ${p.title}\n`);
             }
         } else {
-            description += `📡 Ghidul TV momentan indisponibil.`;
+            description += `📡 Ghidul TV (EPG) indisponibil momentan.`;
         }
 
         return {
             meta: {
                 id, type: 'tv', name: targetName,
-                description,
-                poster: first.attributes?.['tvg-logo'] || first.logo || "",
-                background: first.attributes?.['tvg-logo'] || first.logo || ""
+                description, poster: logo, background: logo, logo: logo
             }
         };
     });
@@ -171,7 +183,7 @@ async function createAddon(config) {
                 const { quality } = cleanChannelName(m.name);
                 return {
                     url: m.url,
-                    title: `🌐 Sursă ${quality ? `[${quality}]` : '[Standard]'}`
+                    title: `🌐 Sursă IPTV ${quality ? `[${quality}]` : '[Standard]'}`
                 };
             })
         };
