@@ -1,12 +1,12 @@
-// IPTV Stremio Addon - Combined & Optimized Version
+// IPTV Stremio Addon - Unrestricted Version (Full Channel Load)
 require('dotenv').config();
 const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
-const ADDON_NAME = "PRO IPTV RO";
-const ADDON_ID = "org.stremio.m3u-epg-ro";
+const ADDON_NAME = "PRO IPTV RO Full";
+const ADDON_ID = "org.stremio.m3u-epg-ro-full";
 
-// Configurare Ora României
+// Forțăm ora României pentru EPG
 const RO_TIME = { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Bucharest', hour12: false };
 
 class M3UEPGAddon {
@@ -16,18 +16,18 @@ class M3UEPGAddon {
         this.lastUpdate = 0;
     }
 
-    // Design Progres Bara
+    // Design Progres Bara cu caractere block
     getProgressBar(start, end) {
         const now = new Date();
         const progress = Math.max(0, Math.min(100, Math.round(((now - start) / (end - start)) * 100)));
         const filled = Math.round(progress / 10);
-        return `${"🟢".repeat(filled)}${"⚪".repeat(10 - filled)} ${progress}%`;
+        return `${"█".repeat(filled)}${"░".repeat(10 - filled)} ${progress}%`;
     }
 
     async getXtreamEpg(streamId) {
         const url = `${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_short_epg&stream_id=${streamId}`;
         try {
-            const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 3000 });
+            const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 4000 });
             const text = await res.text();
             if (text.includes('<html')) return null;
             const data = JSON.parse(text);
@@ -47,12 +47,13 @@ class M3UEPGAddon {
     }
 
     async updateData() {
-        // Păstrăm logica ta originală de import
-        if (Date.now() - this.lastUpdate < 1200000) return; 
+        // Cache 20 min pentru a evita blocarea IP-ului la provider
+        if (Date.now() - this.lastUpdate < 1200000 && this.channels.length > 0) return; 
         try {
             const provider = require(`./src/js/providers/xtreamProvider.js`);
             await provider.fetchData(this);
             this.lastUpdate = Date.now();
+            console.log(`Total canale încărcate: ${this.channels.length}`);
         } catch (e) { console.error("Fetch Error:", e.message); }
     }
 }
@@ -61,7 +62,7 @@ async function createAddon(config) {
     const addon = new M3UEPGAddon(config);
     const builder = new addonBuilder({
         id: ADDON_ID,
-        version: "4.2.0",
+        version: "5.0.0",
         name: ADDON_NAME,
         resources: ["catalog", "stream", "meta"],
         types: ["tv"],
@@ -71,7 +72,7 @@ async function createAddon(config) {
         idPrefixes: ["iptv_"]
     });
 
-    // CATALOG HANDLER
+    // CATALOG HANDLER - LIMITĂRI ELIMINATE
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
         let results = addon.channels;
@@ -82,18 +83,18 @@ async function createAddon(config) {
         }
 
         return { 
-            // Am mărit slice la 1000 pentru a vedea mai multe canale deodată
-            metas: results.slice(0, 1000).map(i => ({
+            // Am scos .slice(), acum trimite TOATE canalele găsite în acest.channels
+            metas: results.map(i => ({
                 id: i.id,
                 type: 'tv',
                 name: i.name,
-                poster: i.attributes?.['tvg-logo'] || i.logo || "https://via.placeholder.com/300x300?text=TV",
+                poster: i.attributes?.['tvg-logo'] || i.logo || "",
                 posterShape: 'square'
             }))
         };
     });
 
-    // META HANDLER (EPG + Ora RO + Logo)
+    // META HANDLER (EPG Complex cu Ora României)
     builder.defineMetaHandler(async ({ id }) => {
         const item = addon.channels.find(i => i.id === id);
         if (!item) return { meta: null };
@@ -110,7 +111,7 @@ async function createAddon(config) {
         description += `──────────────────────────\n`;
 
         if (epg && epg.length > 0) {
-            // Căutăm emisiunea curentă (nu doar prima din listă)
+            // Sincronizare precisă: caută programul care include secunda actuală
             const current = epg.find(p => now >= p.start && now <= p.end) || epg[0];
             
             const s = current.start.toLocaleTimeString('ro-RO', RO_TIME);
@@ -120,7 +121,7 @@ async function createAddon(config) {
             
             const next = epg.filter(p => p.start > now).slice(0, 4);
             if (next.length > 0) {
-                description += `──────────────────────────\n📅 URMEAZĂ:\n`;
+                description += `──────────────────────────\n📅 URMEAZĂ (Ora RO):\n`;
                 next.forEach(p => {
                     description += `• ${p.start.toLocaleTimeString('ro-RO', RO_TIME)} - ${p.title}\n`;
                 });
