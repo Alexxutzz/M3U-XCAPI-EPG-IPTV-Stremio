@@ -8,45 +8,56 @@ const VERSION = "2.8.0";
 const RO_TIME = { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Bucharest', hour12: false };
 
 let channelHistory = []; 
+const fingerprintCache = new Map();
 
-// --- LOGICA DE GRUPARE ȘI CURĂȚARE ---
+// --- LOGICA DE GRUPARE ȘI CURĂȚARE (iMPlayer Style) ---
 
 const getChannelFingerprint = (name) => {
     if (!name) return "";
-    return name.toLowerCase()
-        .replace(/ᵁᴴᴰ|ᴴᴰ/g, '') // Scoate caracterele mici de tip superscript
-        .replace(/^.*?([|:\]\-])\s*/, '') // Scoate prefixele de țară (|RO|, [UK], etc)
-        // Scoatem cuvintele care definesc calitatea pentru a putea grupa FHD cu 4K
-        .replace(/fhd|fullhd|full hd|hd|sd|4k|uhd|1080p|720p|hevc|h265|raw|backup|alt|sports/gi, '')
-        .replace(/[^a-z0-9]/g, '') // Scoate simbolurile și spațiile
+    if (fingerprintCache.has(name)) return fingerprintCache.get(name);
+
+    const fprint = name.toLowerCase()
+        // 1. Scoatem prefixele tip |UK| ✪ sau [RO]
+        .replace(/^\|.*?\|\s*✪?\s*/, '')
+        .replace(/^\[.*?\]\s*/, '')
+        // 2. Scoatem calitățile pentru a uni variantele sub același poster
+        .replace(/uhd|ultra|fhd|hd|sd|1080p|720p|50\s*fps|60\s*fps|dolby|atmos|vision|backup|alt/gi, '')
+        // 3. Unificăm Sky Sport cu Sky Sports
+        .replace(/sports/gi, 'sport')
+        // 4. Curățăm restul de caractere non-alfanumerice
+        .replace(/[^a-z0-9]/g, '')
         .trim();
+    
+    fingerprintCache.set(name, fprint);
+    return fprint;
 };
 
 const cleanDisplayNames = (name) => {
     if (!name) return { baseName: "Canal TV", quality: "", icon: "⚪", rank: 0 };
     
-    let workingName = name.replace(/ᵁᴴᴰ/g, 'UHD').replace(/ᴴᴰ/g, 'HD');
-    const upper = workingName.toUpperCase();
-    
+    const upper = name.toUpperCase().replace(/ᵁ\s*ᴴ\s*ᴰ/g, 'UHD').replace(/ᴴ\s*ᴰ/g, 'HD');
     let quality = "SD", icon = "⚪", rank = 1;
 
-    // Detecție prioritizată și extinsă
-    if (upper.includes("4K") || upper.includes("UHD")) { 
-        quality = "4K UHD"; icon = "🟢"; rank = 4; 
-    } else if (upper.includes("FHD") || upper.includes("1080") || upper.includes("FULLHD") || upper.includes("FULL HD")) { 
-        quality = "Full HD"; icon = "🔵"; rank = 3; 
+    // Ierarhie extinsă bazată pe pozele iMPlayer
+    if (upper.includes("ULTRA") || upper.includes("4K") || upper.includes("UHD")) { 
+        quality = "4K ULTRA UHD"; icon = "🟢"; rank = 5; 
+    } else if (upper.includes("FHD") || upper.includes("1080") || upper.includes("FULL HD")) { 
+        quality = "Full HD"; icon = "🔵"; rank = 4; 
+    } else if (upper.includes("50") && upper.includes("FPS")) { 
+        quality = "HD 50 FPS"; icon = "🟡"; rank = 3; 
     } else if (upper.includes("HD") || upper.includes("720")) { 
         quality = "HD"; icon = "🟡"; rank = 2; 
     }
 
-    let clean = workingName
-        .replace(/^.*?([|:\]\-])\s*/, '') 
-        .replace(/FHD|FULLHD|FULL HD|HD|SD|1080P|720P|4K|UHD|H\.265|HEVC|RAW|BACKUP|ALT/gi, '')
+    // Curățăm numele pentru afișarea pe poster
+    let clean = name
+        .replace(/^\|.*?\|\s*✪?\s*/, '') // Scoate |UK| ✪
+        .replace(/UHD|ULTRA|FHD|FULL HD|HD|SD|1080P|720P|50\s*FPS|60\s*FPS|DOLBY.*|HEVC|H265|RAW|BACKUP|ALT/gi, '')
         .replace(/\[.*?\]|\(.*\)/g, '')
         .replace(/\s+/g, ' ')
         .trim();
 
-    return { baseName: clean || workingName, quality, icon, rank };
+    return { baseName: clean || name, quality, icon, rank };
 };
 
 const getSmartLogo = (item) => {
@@ -70,6 +81,7 @@ class M3UEPGAddon {
             const provider = require(`./src/js/providers/xtreamProvider.js`);
             await provider.fetchData(this);
             this.lastUpdate = Date.now();
+            fingerprintCache.clear();
         } catch (e) { console.error("Data Fetch Error:", e.message); }
     }
 
@@ -108,7 +120,13 @@ async function createAddon(config) {
 
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
-        const genres = [...new Set(addon.channels.map(c => c.category || c.attributes?.['group-title'] || "Altele"))].sort();
+        
+        // Curățăm numele categoriilor (scoatem |UK| ✪) pentru meniul Stremio
+        const genres = [...new Set(addon.channels.map(c => {
+            const cat = c.category || c.attributes?.['group-title'] || "Altele";
+            return cat.replace(/^\|.*?\|\s*✪?\s*/, '').trim();
+        }))].sort();
+        
         if (builder.manifest?.catalogs?.[0]) builder.manifest.catalogs[0].extra[1].options = ["🕒 Istoric Canale", ...genres];
 
         const genreInput = args.extra?.genre || "";
@@ -121,11 +139,10 @@ async function createAddon(config) {
         } else if (genreInput === "🕒 Istoric Canale") {
             results = channelHistory.map(fprint => addon.channels.find(c => getChannelFingerprint(c.name) === fprint)).filter(Boolean);
         } else if (genreInput) {
-            results = results.filter(i => (i.category || i.attributes?.['group-title']) === genreInput);
-        } else {
-            const historyItems = channelHistory.map(fprint => addon.channels.find(c => getChannelFingerprint(c.name) === fprint)).filter(Boolean);
-            const others = addon.channels.filter(c => !channelHistory.includes(getChannelFingerprint(c.name))).slice(0, 40);
-            results = [...historyItems, ...others];
+            results = results.filter(i => {
+                const cat = (i.category || i.attributes?.['group-title'] || "").replace(/^\|.*?\|\s*✪?\s*/, '').trim();
+                return cat === genreInput;
+            });
         }
 
         const unique = new Map();
@@ -172,7 +189,7 @@ async function createAddon(config) {
         }
 
         description += `─────────────────────────────────\n`;
-        description += `⭐ SURSE DISPONIBILE: ${matches.length}`;
+        description += `⭐ SURSE: ${matches.length}`;
 
         return { meta: { id, type: 'tv', name: cleanDisplayNames(matches[0].name).baseName.toUpperCase(), description, poster: logo, background: logo, logo: logo } };
     });
@@ -180,14 +197,12 @@ async function createAddon(config) {
     builder.defineStreamHandler(async ({ id }) => {
         const fingerprint = id.replace("group_", "");
         
-        // Salvăm fingerprint-ul în istoric
         if (!channelHistory.includes(fingerprint)) {
-            channelHistory = [fingerprint, ...channelHistory.filter(f => f !== fingerprint)].slice(0, 10);
+            channelHistory = [fingerprint, ...channelHistory.filter(f => f !== fingerprint)].slice(0, 15);
         }
 
         const matches = addon.channels.filter(c => getChannelFingerprint(c.name) === fingerprint);
 
-        // Sortăm stream-urile după rank (4K > FHD > HD > SD)
         const sortedStreams = matches
             .map(m => ({ ...m, info: cleanDisplayNames(m.name) }))
             .sort((a, b) => b.info.rank - a.info.rank);
@@ -195,7 +210,7 @@ async function createAddon(config) {
         return { 
             streams: sortedStreams.map(m => ({ 
                 url: m.url, 
-                title: `${m.info.icon} ${m.info.quality} | ${m.name}` 
+                title: `${m.info.icon} ${m.info.quality} | ${m.name.replace(/^\|.*?\|\s*✪?\s*/, '')}` 
             })) 
         };
     });
