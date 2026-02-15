@@ -199,22 +199,25 @@ async function createAddon(config) {
     });
 
     // --- STREAM HANDLER (Toate opțiunile vizibile) ---
-    builder.defineStreamHandler(async ({ id }) => {
-        const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
-        
-        channelHistory = [targetName, ...channelHistory.filter(n => n !== targetName)].slice(0, 10);
+   builder.defineStreamHandler(async ({ id }) => {
+    const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
+    const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
 
-        const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
-        return { 
-            streams: matches.map(m => {
-                const info = cleanChannelName(m.name);
-                return { 
-                    url: m.url, 
-                    title: `${info.icon} ${info.quality} | ${m.name}` 
-                };
-            }) 
-        };
-    });
+    return { 
+        streams: matches.map(m => {
+            const info = cleanChannelName(m.name);
+            // Detectăm dacă în numele brut de la provider scrie "50fps" sau "60fps"
+            let fpsLabel = "";
+            if (m.name.toLowerCase().includes("50fps")) fpsLabel = " [50 FPS]";
+            if (m.name.toLowerCase().includes("60fps")) fpsLabel = " [60 FPS]";
+
+            return { 
+                url: m.url, 
+                title: `${info.icon} ${info.quality}${fpsLabel} | ${m.name}` 
+            };
+        }) 
+    };
+});
 
     return builder.getInterface();
 }
