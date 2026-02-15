@@ -67,20 +67,17 @@ class M3UEPGAddon {
             const cached = epgCache.get(streamId);
             if (now - cached.timestamp < 1800000) return cached.data;
         }
-
         const url = `${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_short_epg&stream_id=${streamId}`;
         try {
             const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 4000 });
             const data = await res.json();
             const decode = (str) => { try { return Buffer.from(str, 'base64').toString('utf-8'); } catch(e) { return str; } };
-            
             const processed = data?.epg_listings?.map(p => ({
                 title: p.title ? decode(p.title) : "Program TV",
                 desc: p.description ? decode(p.description) : "",
                 start: new Date(p.start),
                 end: new Date(p.end)
             })) || null;
-
             if (processed) epgCache.set(streamId, { timestamp: now, data: processed });
             return processed;
         } catch (e) { return null; }
@@ -90,8 +87,8 @@ class M3UEPGAddon {
 async function createAddon(config) {
     const addon = new M3UEPGAddon(config);
     
-    // Structura fixă a manifestului pentru a evita TypeError
-    const manifest = {
+    // Definim manifestul separat
+    const myManifest = {
         id: ADDON_ID,
         version: VERSION,
         name: ADDON_NAME,
@@ -101,23 +98,23 @@ async function createAddon(config) {
             type: 'tv', 
             id: 'iptv_stremio', 
             name: '📺 IPTV STREMIO', 
-            extra: [
-                { name: 'search' }, 
-                { name: 'genre', options: [] }
-            ] 
+            extra: [{ name: 'search' }, { name: 'genre', options: [] }] 
         }],
         idPrefixes: ["group_"]
     };
 
-    const builder = new addonBuilder(manifest);
+    const builder = new addonBuilder(myManifest);
 
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
         
-        // Populăm dinamic genurile fără a prăbuși scriptul
+        // Populăm opțiunile de gen în manifestul builder-ului folosind Optional Chaining
         const genres = [...new Set(addon.channels.map(c => c.category || c.attributes?.['group-title'] || "Altele"))].sort();
-        const genreExtra = builder.manifest.catalogs[0].extra.find(e => e.name === 'genre');
-        if (genreExtra) genreExtra.options = genres;
+        
+        if (builder.manifest?.catalogs?.[0]?.extra) {
+            const genreField = builder.manifest.catalogs[0].extra.find(e => e.name === 'genre');
+            if (genreField) genreField.options = genres;
+        }
 
         const searchInput = args.extra?.search?.toLowerCase() || "";
         const genreInput = args.extra?.genre || "";
@@ -167,18 +164,12 @@ async function createAddon(config) {
         if (epg && epg.length > 0) {
             const currentIndex = epg.findIndex(p => now >= p.start && now <= p.end);
             const cur = currentIndex !== -1 ? epg[currentIndex] : epg[0];
-            const next = epg[currentIndex + 1];
-
-            const percent = Math.max(0, Math.min(100, Math.round(((now - cur.start) / (cur.end - cur.start)) * 100)));
-            const bar = "▓".repeat(Math.round(percent / 10)) + "░".repeat(10 - Math.round(percent / 10));
-
             description += `🔴 ACUM ÎN DIFUZARE:\n${cur.title.toUpperCase()}\n`;
-            description += `PROGRES: ${bar} ${percent}%\n\n`;
-            if (cur.desc) description += `ℹ️ INFO: ${cur.desc.substring(0, 150).trim()}...\n\n`;
+            description += `PROGRES: ${Math.max(0, Math.min(100, Math.round(((now - cur.start) / (cur.end - cur.start)) * 100)))}%\n\n`;
         }
 
         description += `─────────────────────────────────\n`;
-        description += `⭐ CALITĂȚI DISPONIBILE: ${[...new Set(matches.map(m => cleanChannelName(m.name).quality || 'SD'))].join(' / ')}`;
+        description += `⭐ CALITĂȚI: ${[...new Set(matches.map(m => cleanChannelName(m.name).quality || 'SD'))].join(' / ')}`;
 
         return { meta: { id, type: 'tv', name: targetName, description, poster: logo, background: logo, logo: logo } };
     });
