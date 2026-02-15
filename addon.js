@@ -2,18 +2,18 @@ require('dotenv').config();
 const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
-const ADDON_NAME = "IPTV Stremio"; // Nume actualizat
+const ADDON_NAME = "IPTV Stremio";
 const ADDON_ID = "org.stremio.iptv.4k.v280";
-const VERSION = "2.8.0"; // Versiune păstrată
+const VERSION = "2.8.0";
 const RO_TIME = { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Bucharest', hour12: false };
 
-// Cache global pentru EPG pentru performanță sporită
 const epgCache = new Map();
 
+// Canale care vor apărea pe prima pagină (Home)
 const FEATURED_CHANNELS = [
-    "SKY SPORTS MAIN EVENT", "SKY SPORTS PREMIER LEAGUE", "SKY SPORTS FOOTBALL", 
-    "TNT SPORTS 1", "TNT SPORTS 2", "PRO TV", "DIGI SPORT 1", "DIGI SPORT 2", 
-    "DIGI SPORT 3", "DIGI SPORT 4", "ANTENA 1"
+    "PRO TV", "ANTENA 1", "DIGI SPORT 1", "DIGI SPORT 2", 
+    "DIGI SPORT 3", "DIGI SPORT 4", "HBO", "CINEMAX", 
+    "EUROSPORT", "SKY SPORTS", "TNT SPORTS"
 ];
 
 // --- UTILITARE ---
@@ -37,11 +37,9 @@ const cleanChannelName = (name) => {
     return { baseName: clean || name, quality: quality };
 };
 
-// Logica Logo Fallback: generează un icon dacă lipsește logoul oficial
 const getSmartLogo = (item) => {
     const primaryLogo = item.attributes?.['tvg-logo'] || item.logo;
     if (primaryLogo && primaryLogo.startsWith('http')) return primaryLogo;
-    
     const channelName = encodeURIComponent(cleanChannelName(item.name).baseName);
     return `https://ui-avatars.com/api/?name=${channelName}&background=0D8ABC&color=fff&size=512`; 
 };
@@ -56,6 +54,7 @@ class M3UEPGAddon {
     }
 
     async updateData() {
+        // Update la fiecare 15 min
         if (Date.now() - this.lastUpdate < 900000 && this.channels.length > 0) return;
         try {
             const provider = require(`./src/js/providers/xtreamProvider.js`);
@@ -66,8 +65,6 @@ class M3UEPGAddon {
 
     async getXtreamEpg(streamId) {
         const now = Date.now();
-        
-        // Verificare Cache (valabilitate 30 min)
         if (epgCache.has(streamId)) {
             const cached = epgCache.get(streamId);
             if (now - cached.timestamp < 1800000) return cached.data;
@@ -94,6 +91,13 @@ class M3UEPGAddon {
 
 async function createAddon(config) {
     const addon = new M3UEPGAddon(config);
+    
+    // Extragem dinamic genurile (categoriile) de la noul provider
+    const getDynamicGenres = () => {
+        const genres = [...new Set(addon.channels.map(c => c.category || c.attributes?.['group-title'] || "Altele"))];
+        return genres.sort();
+    };
+
     const builder = new addonBuilder({
         id: ADDON_ID,
         version: VERSION,
@@ -104,13 +108,20 @@ async function createAddon(config) {
             type: 'tv', 
             id: 'iptv_stremio', 
             name: '📺 IPTV STREMIO', 
-            extra: [{ name: 'search' }, { name: 'genre', options: ['Ultra HD / 4K', 'Sport', 'Filme', 'Documentare'] }] 
+            extra: [
+                { name: 'search' }, 
+                { name: 'genre', options: [] } // Se va popula dinamic
+            ] 
         }],
         idPrefixes: ["group_"]
     });
 
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
+        
+        // Populăm meniul de genuri cu categoriile noului provider
+        builder.manifest.catalogs[0].extra[1].options = getDynamicGenres();
+
         const searchInput = args.extra?.search?.toLowerCase() || "";
         const genreInput = args.extra?.genre || "";
 
@@ -119,11 +130,11 @@ async function createAddon(config) {
         if (searchInput) {
             const words = searchInput.split(/\s+/);
             results = results.filter(item => words.every(word => item.name.toLowerCase().includes(word)));
-        } else if (genreInput === 'Ultra HD / 4K') {
-            results = results.filter(i => i.name.toUpperCase().includes("4K") || i.name.toUpperCase().includes("UHD"));
         } else if (genreInput) {
-            results = results.filter(i => (i.attributes?.['group-title'] || "").toLowerCase().includes(genreInput.toLowerCase()));
+            // Filtrare pe categoria exactă a providerului
+            results = results.filter(i => (i.category || i.attributes?.['group-title']) === genreInput);
         } else {
+            // Pagina principală: Featured
             results = results.filter(i => FEATURED_CHANNELS.some(f => i.name.toUpperCase().includes(f)));
         }
 
@@ -154,7 +165,6 @@ async function createAddon(config) {
         const epg = await addon.getXtreamEpg(streamId);
         const now = new Date();
 
-        // --- DESIGN INTERFAȚĂ EPG ---
         let description = `📅 DATA: ${now.toLocaleDateString('ro-RO')}  |  🕒 ORA: ${now.toLocaleTimeString('ro-RO', RO_TIME)}\n`;
         description += `📺 CANAL: ${targetName.toUpperCase()}\n`;
         description += `─────────────────────────────────\n\n`;
@@ -192,7 +202,6 @@ async function createAddon(config) {
         const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
         const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
         
-        // Sortare: 4K/UHD primele în listă
         const sorted = matches.sort((a, b) => {
             const is4K = (n) => n.toUpperCase().includes("4K") || n.toUpperCase().includes("UHD");
             return is4K(b.name) - is4K(a.name);
