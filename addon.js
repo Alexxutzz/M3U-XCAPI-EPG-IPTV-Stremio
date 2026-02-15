@@ -9,7 +9,6 @@ const RO_TIME = { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Buchares
 
 const epgCache = new Map();
 
-// Canale care vor apărea pe prima pagină (Home)
 const FEATURED_CHANNELS = [
     "PRO TV", "ANTENA 1", "DIGI SPORT 1", "DIGI SPORT 2", 
     "DIGI SPORT 3", "DIGI SPORT 4", "HBO", "CINEMAX", 
@@ -54,7 +53,6 @@ class M3UEPGAddon {
     }
 
     async updateData() {
-        // Update la fiecare 15 min
         if (Date.now() - this.lastUpdate < 900000 && this.channels.length > 0) return;
         try {
             const provider = require(`./src/js/providers/xtreamProvider.js`);
@@ -92,13 +90,8 @@ class M3UEPGAddon {
 async function createAddon(config) {
     const addon = new M3UEPGAddon(config);
     
-    // Extragem dinamic genurile (categoriile) de la noul provider
-    const getDynamicGenres = () => {
-        const genres = [...new Set(addon.channels.map(c => c.category || c.attributes?.['group-title'] || "Altele"))];
-        return genres.sort();
-    };
-
-    const builder = new addonBuilder({
+    // Structura fixă a manifestului pentru a evita TypeError
+    const manifest = {
         id: ADDON_ID,
         version: VERSION,
         name: ADDON_NAME,
@@ -110,17 +103,21 @@ async function createAddon(config) {
             name: '📺 IPTV STREMIO', 
             extra: [
                 { name: 'search' }, 
-                { name: 'genre', options: [] } // Se va popula dinamic
+                { name: 'genre', options: [] }
             ] 
         }],
         idPrefixes: ["group_"]
-    });
+    };
+
+    const builder = new addonBuilder(manifest);
 
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
         
-        // Populăm meniul de genuri cu categoriile noului provider
-        builder.manifest.catalogs[0].extra[1].options = getDynamicGenres();
+        // Populăm dinamic genurile fără a prăbuși scriptul
+        const genres = [...new Set(addon.channels.map(c => c.category || c.attributes?.['group-title'] || "Altele"))].sort();
+        const genreExtra = builder.manifest.catalogs[0].extra.find(e => e.name === 'genre');
+        if (genreExtra) genreExtra.options = genres;
 
         const searchInput = args.extra?.search?.toLowerCase() || "";
         const genreInput = args.extra?.genre || "";
@@ -131,10 +128,8 @@ async function createAddon(config) {
             const words = searchInput.split(/\s+/);
             results = results.filter(item => words.every(word => item.name.toLowerCase().includes(word)));
         } else if (genreInput) {
-            // Filtrare pe categoria exactă a providerului
             results = results.filter(i => (i.category || i.attributes?.['group-title']) === genreInput);
         } else {
-            // Pagina principală: Featured
             results = results.filter(i => FEATURED_CHANNELS.some(f => i.name.toUpperCase().includes(f)));
         }
 
@@ -178,22 +173,12 @@ async function createAddon(config) {
             const bar = "▓".repeat(Math.round(percent / 10)) + "░".repeat(10 - Math.round(percent / 10));
 
             description += `🔴 ACUM ÎN DIFUZARE:\n${cur.title.toUpperCase()}\n`;
-            description += `[ ${cur.start.toLocaleTimeString('ro-RO', RO_TIME)} — ${cur.end.toLocaleTimeString('ro-RO', RO_TIME)} ]\n`;
             description += `PROGRES: ${bar} ${percent}%\n\n`;
-
             if (cur.desc) description += `ℹ️ INFO: ${cur.desc.substring(0, 150).trim()}...\n\n`;
-
-            if (next) {
-                description += `─────────────────────────────────\n`;
-                description += `⏭️ URMEAZĂ:\n${next.title.toUpperCase()}\n`;
-                description += `🕒 START: ${next.start.toLocaleTimeString('ro-RO', RO_TIME)}\n\n`;
-            }
-        } else {
-            description += `📡 Ghidul TV (EPG) momentan indisponibil.\n\n`;
         }
 
         description += `─────────────────────────────────\n`;
-        description += `⭐ CALITĂȚI: ${[...new Set(matches.map(m => cleanChannelName(m.name).quality || 'SD'))].join(' / ')}`;
+        description += `⭐ CALITĂȚI DISPONIBILE: ${[...new Set(matches.map(m => cleanChannelName(m.name).quality || 'SD'))].join(' / ')}`;
 
         return { meta: { id, type: 'tv', name: targetName, description, poster: logo, background: logo, logo: logo } };
     });
@@ -202,15 +187,20 @@ async function createAddon(config) {
         const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
         const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
         
-        const sorted = matches.sort((a, b) => {
-            const is4K = (n) => n.toUpperCase().includes("4K") || n.toUpperCase().includes("UHD");
-            return is4K(b.name) - is4K(a.name);
-        });
+        const getScore = (name) => {
+            const n = name.toUpperCase();
+            if (n.includes("4K") || n.includes("UHD")) return 3;
+            if (n.includes("FHD") || n.includes("1080")) return 2;
+            if (n.includes("HD") || n.includes("720")) return 1;
+            return 0;
+        };
+
+        const sorted = matches.sort((a, b) => getScore(b.name) - getScore(a.name));
 
         return { 
-            streams: sorted.map(m => ({ 
+            streams: sorted.map((m, index) => ({ 
                 url: m.url, 
-                title: `Sursă ${cleanChannelName(m.name).quality || 'Standard'}` 
+                title: `${index === 0 ? '⭐ AUTO-SELECT: ' : ''}${cleanChannelName(m.name).quality || 'Calitate Standard'}` 
             })) 
         };
     });
