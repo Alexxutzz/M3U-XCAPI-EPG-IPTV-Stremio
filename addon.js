@@ -9,27 +9,28 @@ const RO_TIME = { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Buchares
 
 let channelHistory = []; 
 
-// --- UTILITARE ---
+// --- LOGICA DE GRUPARE ȘI CURĂȚARE ---
 
-const normalizeString = (str) => {
-    if (!str) return "";
-    return str.toLowerCase()
-        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-        .replace(/[^a-z0-9\s]/g, "")
+const getChannelFingerprint = (name) => {
+    if (!name) return "";
+    return name.toLowerCase()
+        .replace(/ᵁᴴᴰ|ᴴᴰ/g, '') // Scoate caracterele mici de tip superscript
+        .replace(/^.*?([|:\]\-])\s*/, '') // Scoate prefixele de țară (|RO|, [UK], etc)
+        .replace(/fhd|hd|sd|4k|uhd|1080p|720p|hevc|h265|raw|backup|alt|sports/gi, '') // Scoate calitatea și pluralul "sports"
+        .replace(/[^a-z0-9]/g, '') // Scoate absolut orice simbol sau spațiu
         .trim();
 };
 
-const cleanChannelName = (name) => {
-    if (!name) return { baseName: "Canal TV", quality: "", icon: "⚪" };
+const cleanDisplayNames = (name) => {
+    if (!name) return { baseName: "Canal TV", quality: "", icon: "⚪", rank: 0 };
     
     let workingName = name.replace(/ᵁᴴᴰ/g, 'UHD').replace(/ᴴᴰ/g, 'HD');
     const upper = workingName.toUpperCase();
-    let quality = "SD";
-    let icon = "⚪";
+    let quality = "SD", icon = "⚪", rank = 1;
 
-    if (upper.includes("4K") || upper.includes("UHD")) { quality = "4K UHD"; icon = "🟢"; }
-    else if (upper.includes("FHD") || upper.includes("1080")) { quality = "Full HD"; icon = "🔵"; }
-    else if (upper.includes("HD")) { quality = "HD"; icon = "🟡"; }
+    if (upper.includes("4K") || upper.includes("UHD")) { quality = "4K UHD"; icon = "🟢"; rank = 4; }
+    else if (upper.includes("FHD") || upper.includes("1080")) { quality = "Full HD"; icon = "🔵"; rank = 3; }
+    else if (upper.includes("HD")) { quality = "HD"; icon = "🟡"; rank = 2; }
 
     let clean = workingName
         .replace(/^.*?([|:\]\-])\s*/, '') 
@@ -38,16 +39,16 @@ const cleanChannelName = (name) => {
         .replace(/\s+/g, ' ')
         .trim();
 
-    return { baseName: clean || workingName, quality, icon };
+    return { baseName: clean || workingName, quality, icon, rank };
 };
 
 const getSmartLogo = (item) => {
     const primaryLogo = item.attributes?.['tvg-logo'] || item.logo;
     if (primaryLogo && primaryLogo.startsWith('http')) return primaryLogo;
-    return `https://ui-avatars.com/api/?name=${encodeURIComponent(cleanChannelName(item.name).baseName)}&background=0D8ABC&color=fff&size=512`; 
+    return `https://ui-avatars.com/api/?name=${encodeURIComponent(cleanDisplayNames(item.name).baseName)}&background=0D8ABC&color=fff&size=512`; 
 };
 
-// --- LOGICA ADDON ---
+// --- CLASA PRINCIPALĂ ---
 
 class M3UEPGAddon {
     constructor(config = {}) {
@@ -79,25 +80,6 @@ class M3UEPGAddon {
             })) || null;
         } catch (e) { return null; }
     }
-
-    async getStreamDetails(streamId) {
-        const url = `${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_live_streams&stream_id=${streamId}`;
-        try {
-            const res = await fetch(url, { timeout: 3000 });
-            const data = await res.json();
-            const info = Array.isArray(data) ? data.find(i => i.stream_id == streamId) : data;
-            if (info && info.stream_decode) {
-                const d = info.stream_decode;
-                return {
-                    fps: d.frame_rate || "N/A",
-                    bitrate: d.bitrate ? `${(d.bitrate / 1024).toFixed(1)} Mbps` : "N/A",
-                    codec: d.video_codec || "H.264",
-                    res: d.width && d.height ? `${d.width}x${d.height}` : ""
-                };
-            }
-        } catch (e) { return null; }
-        return null;
-    }
 }
 
 async function createAddon(config) {
@@ -120,48 +102,34 @@ async function createAddon(config) {
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
         const genres = [...new Set(addon.channels.map(c => c.category || c.attributes?.['group-title'] || "Altele"))].sort();
-        
-        if (builder.manifest?.catalogs?.[0]) {
-            builder.manifest.catalogs[0].extra[1].options = ["🕒 Istoric Canale", ...genres];
-        }
+        if (builder.manifest?.catalogs?.[0]) builder.manifest.catalogs[0].extra[1].options = ["🕒 Istoric Canale", ...genres];
 
         const genreInput = args.extra?.genre || "";
-        const searchInput = args.extra?.search ? normalizeString(args.extra.search) : "";
+        const searchInput = args.extra?.search?.toLowerCase().trim() || "";
 
         let results = addon.channels;
 
         if (searchInput) {
-            const searchWords = searchInput.split(/\s+/);
-            results = addon.channels
-                .map(item => {
-                    const normalizedName = normalizeString(item.name);
-                    let score = 0;
-                    if (normalizedName.includes(searchInput)) score += 100;
-                    if (normalizedName.startsWith(searchWords[0])) score += 50;
-                    searchWords.forEach(word => { if (normalizedName.includes(word)) score += 10; });
-                    return { item, score };
-                })
-                .filter(obj => obj.score > 0)
-                .sort((a, b) => b.score - a.score)
-                .map(obj => obj.item);
+            results = results.filter(item => item.name.toLowerCase().includes(searchInput));
         } else if (genreInput === "🕒 Istoric Canale") {
-            results = channelHistory.map(name => addon.channels.find(c => cleanChannelName(c.name).baseName === name)).filter(Boolean);
+            results = channelHistory.map(fprint => addon.channels.find(c => getChannelFingerprint(c.name) === fprint)).filter(Boolean);
         } else if (genreInput) {
             results = results.filter(i => (i.category || i.attributes?.['group-title']) === genreInput);
         } else {
-            const historyItems = channelHistory.map(name => addon.channels.find(c => cleanChannelName(c.name).baseName === name)).filter(Boolean);
-            const others = addon.channels.filter(c => !channelHistory.includes(cleanChannelName(c.name).baseName)).slice(0, 40);
+            const historyItems = channelHistory.map(fprint => addon.channels.find(c => getChannelFingerprint(c.name) === fprint)).filter(Boolean);
+            const others = addon.channels.filter(c => !channelHistory.includes(getChannelFingerprint(c.name))).slice(0, 40);
             results = [...historyItems, ...others];
         }
 
         const unique = new Map();
         results.forEach(item => {
-            const { baseName } = cleanChannelName(item.name);
-            if (!unique.has(baseName)) {
-                unique.set(baseName, {
-                    id: `group_${Buffer.from(baseName).toString('hex')}`,
+            const fingerprint = getChannelFingerprint(item.name);
+            const { baseName } = cleanDisplayNames(item.name);
+            if (!unique.has(fingerprint)) {
+                unique.set(fingerprint, {
+                    id: `group_${fingerprint}`,
                     type: 'tv',
-                    name: baseName,
+                    name: baseName.toUpperCase(),
                     poster: getSmartLogo(item),
                     posterShape: 'square'
                 });
@@ -172,72 +140,54 @@ async function createAddon(config) {
     });
 
     builder.defineMetaHandler(async ({ id }) => {
-        const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
-        const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
+        const fingerprint = id.replace("group_", "");
+        const matches = addon.channels.filter(c => getChannelFingerprint(c.name) === fingerprint);
         if (!matches.length) return { meta: null };
         
         const logo = getSmartLogo(matches[0]);
         const streamId = matches[0].id.split('_').pop();
+        const epg = await addon.getXtreamEpg(streamId);
         const now = new Date();
 
-        const [epg, tech] = await Promise.all([
-            addon.getXtreamEpg(streamId),
-            addon.getStreamDetails(streamId)
-        ]);
-
         let description = `📅 DATA: ${now.toLocaleDateString('ro-RO')}  |  🕒 ORA: ${now.toLocaleTimeString('ro-RO', RO_TIME)}\n`;
-        description += `📺 CANAL: ${targetName.toUpperCase()}\n`;
-        description += `─────────────────────────────────\n`;
-        
-        if (tech) {
-            description += `📊 TECH: ${tech.res} | ${tech.fps} FPS | ${tech.bitrate} | ${tech.codec}\n`;
-            description += `─────────────────────────────────\n\n`;
-        }
+        description += `📺 CANAL: ${cleanDisplayNames(matches[0].name).baseName.toUpperCase()}\n`;
+        description += `─────────────────────────────────\n\n`;
 
         if (epg && epg.length > 0) {
             const currentIndex = epg.findIndex(p => now >= p.start && now <= p.end);
             const cur = currentIndex !== -1 ? epg[currentIndex] : epg[0];
-            const next = epg[currentIndex + 1];
-
             const percent = Math.max(0, Math.min(100, Math.round(((now - cur.start) / (cur.end - cur.start)) * 100)));
             const bar = "▓".repeat(Math.round(percent / 10)) + "░".repeat(10 - Math.round(percent / 10));
 
-            description += `🔴 ACUM ÎN DIFUZARE:\n${cur.title.toUpperCase()}\n`;
+            description += `🔴 ACUM:\n${cur.title.toUpperCase()}\n`;
             description += `[ ${cur.start.toLocaleTimeString('ro-RO', RO_TIME)} — ${cur.end.toLocaleTimeString('ro-RO', RO_TIME)} ]\n`;
             description += `PROGRES: ${bar} ${percent}%\n\n`;
-            if (cur.desc) description += `ℹ️ INFO: ${cur.desc.substring(0, 150).trim()}...\n\n`;
-
-            if (next) {
-                description += `─────────────────────────────────\n`;
-                description += `⏭️ URMEAZĂ:\n${next.title.toUpperCase()}\n`;
-                description += `🕒 START: ${next.start.toLocaleTimeString('ro-RO', RO_TIME)}\n\n`;
-            }
-        } else {
-            description += `📡 Ghidul TV (EPG) momentan indisponibil.\n\n`;
         }
 
         description += `─────────────────────────────────\n`;
-        description += `⭐ CALITĂȚI: ${[...new Set(matches.map(m => cleanChannelName(m.name).quality))].join(' / ')}`;
+        description += `⭐ SURSE DISPONIBILE: ${matches.length}`;
 
-        return { meta: { id, type: 'tv', name: targetName, description, poster: logo, background: logo, logo: logo } };
+        return { meta: { id, type: 'tv', name: cleanDisplayNames(matches[0].name).baseName.toUpperCase(), description, poster: logo, background: logo, logo: logo } };
     });
 
     builder.defineStreamHandler(async ({ id }) => {
-        const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
-        channelHistory = [targetName, ...channelHistory.filter(n => n !== targetName)].slice(0, 10);
-        const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
+        const fingerprint = id.replace("group_", "");
+        
+        // Salvăm fingerprint-ul în istoric
+        channelHistory = [fingerprint, ...channelHistory.filter(f => f !== fingerprint)].slice(0, 10);
+
+        const matches = addon.channels.filter(c => getChannelFingerprint(c.name) === fingerprint);
+
+        // Sortăm stream-urile după rank (4K > FHD > HD > SD)
+        const sortedStreams = matches
+            .map(m => ({ ...m, info: cleanDisplayNames(m.name) }))
+            .sort((a, b) => b.info.rank - a.info.rank);
 
         return { 
-            streams: matches.map(m => {
-                const info = cleanChannelName(m.name);
-                let fpsLabel = "";
-                if (m.name.toLowerCase().includes("50fps")) fpsLabel = " [50 FPS]";
-                if (m.name.toLowerCase().includes("60fps")) fpsLabel = " [60 FPS]";
-                return { 
-                    url: m.url, 
-                    title: `${info.icon} ${info.quality}${fpsLabel} | ${m.name}` 
-                };
-            }) 
+            streams: sortedStreams.map(m => ({ 
+                url: m.url, 
+                title: `${m.info.icon} ${m.info.quality} | ${m.name}` 
+            })) 
         };
     });
 
