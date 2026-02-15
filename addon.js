@@ -2,21 +2,20 @@ require('dotenv').config();
 const { addonBuilder } = require("stremio-addon-sdk");
 const fetch = require('node-fetch');
 
-const ADDON_NAME = "IPTV Universal";
-const ADDON_ID = "org.stremio.iptv.universal.v280";
+const ADDON_NAME = "IPTV Stremio";
+const ADDON_ID = "org.stremio.iptv.stremio.v280";
 const VERSION = "2.8.0";
 const RO_TIME = { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Bucharest', hour12: false };
 
-// Istoric în memorie (evită eroarea EROFS de pe hosting-uri read-only)
 let channelHistory = []; 
 
-// --- UTILITARE CURĂȚARE ȘI NORMALIZARE ---
+// --- UTILITARE ---
 
 const normalizeString = (str) => {
     if (!str) return "";
     return str.toLowerCase()
-        .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Elimină diacriticele
-        .replace(/[^a-z0-9\s]/g, "") // Elimină simbolurile pentru o căutare iertătoare
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9\s]/g, "")
         .trim();
 };
 
@@ -80,6 +79,25 @@ class M3UEPGAddon {
             })) || null;
         } catch (e) { return null; }
     }
+
+    async getStreamDetails(streamId) {
+        const url = `${this.config.xtreamUrl}/player_api.php?username=${this.config.xtreamUsername}&password=${this.config.xtreamPassword}&action=get_live_streams&stream_id=${streamId}`;
+        try {
+            const res = await fetch(url, { timeout: 3000 });
+            const data = await res.json();
+            const info = Array.isArray(data) ? data.find(i => i.stream_id == streamId) : data;
+            if (info && info.stream_decode) {
+                const d = info.stream_decode;
+                return {
+                    fps: d.frame_rate || "N/A",
+                    bitrate: d.bitrate ? `${(d.bitrate / 1024).toFixed(1)} Mbps` : "N/A",
+                    codec: d.video_codec || "H.264",
+                    res: d.width && d.height ? `${d.width}x${d.height}` : ""
+                };
+            }
+        } catch (e) { return null; }
+        return null;
+    }
 }
 
 async function createAddon(config) {
@@ -93,13 +111,12 @@ async function createAddon(config) {
         catalogs: [{ 
             type: 'tv', 
             id: 'iptv_stremio', 
-            name: '📺 IPTV UNIVERSAL', 
+            name: '📺 IPTV STREMIO', 
             extra: [{ name: 'search' }, { name: 'genre', options: [] }] 
         }],
         idPrefixes: ["group_"]
     });
 
-    // --- CATALOG HANDLER (Search Inteligent + Istoric) ---
     builder.defineCatalogHandler(async (args) => {
         await addon.updateData();
         const genres = [...new Set(addon.channels.map(c => c.category || c.attributes?.['group-title'] || "Altele"))].sort();
@@ -154,7 +171,6 @@ async function createAddon(config) {
         return { metas: Array.from(unique.values()).slice(0, 100) };
     });
 
-    // --- META HANDLER (EPG Detaliat) ---
     builder.defineMetaHandler(async ({ id }) => {
         const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
         const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
@@ -162,12 +178,21 @@ async function createAddon(config) {
         
         const logo = getSmartLogo(matches[0]);
         const streamId = matches[0].id.split('_').pop();
-        const epg = await addon.getXtreamEpg(streamId);
         const now = new Date();
+
+        const [epg, tech] = await Promise.all([
+            addon.getXtreamEpg(streamId),
+            addon.getStreamDetails(streamId)
+        ]);
 
         let description = `📅 DATA: ${now.toLocaleDateString('ro-RO')}  |  🕒 ORA: ${now.toLocaleTimeString('ro-RO', RO_TIME)}\n`;
         description += `📺 CANAL: ${targetName.toUpperCase()}\n`;
-        description += `─────────────────────────────────\n\n`;
+        description += `─────────────────────────────────\n`;
+        
+        if (tech) {
+            description += `📊 TECH: ${tech.res} | ${tech.fps} FPS | ${tech.bitrate} | ${tech.codec}\n`;
+            description += `─────────────────────────────────\n\n`;
+        }
 
         if (epg && epg.length > 0) {
             const currentIndex = epg.findIndex(p => now >= p.start && now <= p.end);
@@ -180,7 +205,6 @@ async function createAddon(config) {
             description += `🔴 ACUM ÎN DIFUZARE:\n${cur.title.toUpperCase()}\n`;
             description += `[ ${cur.start.toLocaleTimeString('ro-RO', RO_TIME)} — ${cur.end.toLocaleTimeString('ro-RO', RO_TIME)} ]\n`;
             description += `PROGRES: ${bar} ${percent}%\n\n`;
-
             if (cur.desc) description += `ℹ️ INFO: ${cur.desc.substring(0, 150).trim()}...\n\n`;
 
             if (next) {
@@ -198,26 +222,24 @@ async function createAddon(config) {
         return { meta: { id, type: 'tv', name: targetName, description, poster: logo, background: logo, logo: logo } };
     });
 
-    // --- STREAM HANDLER (Toate opțiunile vizibile) ---
-   builder.defineStreamHandler(async ({ id }) => {
-    const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
-    const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
+    builder.defineStreamHandler(async ({ id }) => {
+        const targetName = Buffer.from(id.replace("group_", ""), 'hex').toString();
+        channelHistory = [targetName, ...channelHistory.filter(n => n !== targetName)].slice(0, 10);
+        const matches = addon.channels.filter(c => cleanChannelName(c.name).baseName === targetName);
 
-    return { 
-        streams: matches.map(m => {
-            const info = cleanChannelName(m.name);
-            // Detectăm dacă în numele brut de la provider scrie "50fps" sau "60fps"
-            let fpsLabel = "";
-            if (m.name.toLowerCase().includes("50fps")) fpsLabel = " [50 FPS]";
-            if (m.name.toLowerCase().includes("60fps")) fpsLabel = " [60 FPS]";
-
-            return { 
-                url: m.url, 
-                title: `${info.icon} ${info.quality}${fpsLabel} | ${m.name}` 
-            };
-        }) 
-    };
-});
+        return { 
+            streams: matches.map(m => {
+                const info = cleanChannelName(m.name);
+                let fpsLabel = "";
+                if (m.name.toLowerCase().includes("50fps")) fpsLabel = " [50 FPS]";
+                if (m.name.toLowerCase().includes("60fps")) fpsLabel = " [60 FPS]";
+                return { 
+                    url: m.url, 
+                    title: `${info.icon} ${info.quality}${fpsLabel} | ${m.name}` 
+                };
+            }) 
+        };
+    });
 
     return builder.getInterface();
 }
